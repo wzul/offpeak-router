@@ -23,6 +23,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -62,6 +63,17 @@ type fetchDoc struct {
 func newWebClient() *http.Client {
 	return &http.Client{
 		Timeout: fetchTimeout,
+		// Validate at connection time, not just before the request: a hostname
+		// that re-resolves between the check and the dial would otherwise slip
+		// through (DNS rebinding). The dialed address is the one that was checked.
+		Transport: &http.Transport{
+			Proxy:                 nil, // an environment proxy would bypass the guard
+			DialContext:           safeDialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			MaxIdleConns:          4,
+			IdleConnTimeout:       30 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
@@ -73,6 +85,84 @@ func newWebClient() *http.Client {
 
 var webClient = newWebClient()
 
+// localNets holds every subnet this machine can reach without leaving the box -
+// docker bridges included. RFC1918 alone is not enough: docker hands out ranges
+// like 172.80.0.0/16, which is public address space and passes IsPrivate().
+var (
+	localNetsMu sync.RWMutex
+	localNets   []*net.IPNet
+	localNetsAt time.Time
+	localNetTTL = 5 * time.Minute
+)
+
+func refreshLocalNets() {
+	localNetsMu.RLock()
+	fresh := time.Since(localNetsAt) < localNetTTL && localNets != nil
+	localNetsMu.RUnlock()
+	if fresh {
+		return
+	}
+	var nets []*net.IPNet
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok {
+					nets = append(nets, &net.IPNet{IP: n.IP.Mask(n.Mask), Mask: n.Mask})
+				}
+			}
+		}
+	}
+	localNetsMu.Lock()
+	localNets, localNetsAt = nets, time.Now()
+	localNetsMu.Unlock()
+}
+
+func inLocalNet(ip net.IP) bool {
+	refreshLocalNets()
+	localNetsMu.RLock()
+	defer localNetsMu.RUnlock()
+	for _, n := range localNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// safeDialContext resolves once, refuses non-public results, then dials the
+// checked IP itself so the name cannot resolve differently a moment later.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s: no addresses", host)
+	}
+	chosen := ips[0].IP
+	for _, cand := range ips {
+		if !isBlockedIP(cand.IP) {
+			chosen = cand.IP
+			break
+		}
+	}
+	if isBlockedIP(chosen) {
+		return nil, fmt.Errorf("refusing to fetch %s: resolves to a non-public address", host)
+	}
+	return webDialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
+}
+
+var webDialer = &net.Dialer{Timeout: 10 * time.Second}
+
 // guardURL rejects anything that is not plain http(s) on a public address.
 func guardURL(u *url.URL) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
@@ -82,9 +172,18 @@ func guardURL(u *url.URL) error {
 	if host == "" {
 		return errors.New("missing host")
 	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("refusing to fetch %s: non-public address", host)
+		}
+		return nil
+	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("resolve %s: no addresses", host)
 	}
 	for _, ip := range ips {
 		if isBlockedIP(ip) {
@@ -95,6 +194,9 @@ func guardURL(u *url.URL) error {
 }
 
 func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
@@ -108,7 +210,9 @@ func isBlockedIP(ip net.IP) bool {
 			return true
 		}
 	}
-	return false
+	// Anything on a subnet this host itself sits on - docker bridges such as
+	// 172.80.0.1 are outside RFC1918 and would otherwise be fair game.
+	return inLocalNet(ip)
 }
 
 func handleSearch(w http.ResponseWriter, r *http.Request) {

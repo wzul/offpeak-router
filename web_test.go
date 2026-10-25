@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A real DuckDuckGo HTML fragment: results wrapped in a /l/?uddg= redirect, an
@@ -238,4 +239,33 @@ func fetchDirect(t *testing.T, target string) fetchDoc {
 		doc.Title, doc.Content = htmlToText(string(raw))
 	}
 	return doc
+}
+
+// Docker bridges are outside RFC1918 (172.80.0.0/16 is public space by the
+// standard) yet reachable from the host, so the guard must also refuse anything
+// on a subnet this machine sits on.
+func TestIsBlockedIPRefusesLocalSubnet(t *testing.T) {
+	_, n, _ := net.ParseCIDR("172.80.0.0/16")
+	localNetsMu.Lock()
+	prevNets, prevAt := localNets, localNetsAt
+	localNets, localNetsAt = []*net.IPNet{n}, time.Now()
+	localNetsMu.Unlock()
+	defer func() {
+		localNetsMu.Lock()
+		localNets, localNetsAt = prevNets, prevAt
+		localNetsMu.Unlock()
+	}()
+
+	if !isBlockedIP(net.ParseIP("172.80.0.1")) {
+		t.Error("172.80.0.1 is on the host's own docker bridge and must be blocked")
+	}
+	if !isBlockedIP(net.ParseIP("172.80.1.14")) {
+		t.Error("172.80.1.14 (a container) must be blocked")
+	}
+	if isBlockedIP(net.ParseIP("1.1.1.1")) {
+		t.Error("1.1.1.1 is public and must be allowed")
+	}
+	if err := guardURL(&url.URL{Scheme: "http", Host: "172.80.0.1:8788", Path: "/status"}); err == nil {
+		t.Error("guardURL let a local-bridge address through")
+	}
 }
