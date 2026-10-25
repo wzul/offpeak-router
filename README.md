@@ -175,6 +175,31 @@ curl -s -X POST http://127.0.0.1:8788/v1/fetch \
 - Neither route costs anything: they are not model calls and do not touch the spend ledger.
   `/status` counts them under `web.search_calls` / `web.fetch_calls`.
 
+### Model discovery, in both dialects
+
+`/v1/models` is the OpenAI answer. Some clients do not ask it first: they probe for
+Ollama (`{server}/api/tags`, expecting a `models` key) to decide whether a server is
+usable at all, and a 404 there makes them give up even though `/v1/models` would have
+answered. Both shapes are served from the same table:
+
+```bash
+curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/api/tags
+# {"models":[{"name":"deepseek-v4.1-flash:latest","model":"…","modified_at":"…","size":0,
+#             "digest":"","details":{"family":"chat","families":["go","nous","ollama"],
+#             "router_api":"chat","router_providers":["go","nous","ollama"]}}]}
+curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/api/version
+# {"version":"1.3.0"}
+```
+
+- Names follow Ollama's `name:tag` convention; a bare id gets `:latest`. Both `name`
+  and `model` carry it because clients read either.
+- `size` stays `0` and `digest` stays empty: a routed model has no local weights, and
+  inventing a blob description would be a lie a client could act on.
+- `details.router_api` is the route family that model actually answers on — `chat` for
+  `/v1/chat/completions`, `systemone` for `/v1/systemone`. A decision model listed here
+  still rejects a chat request, exactly as `/v1/models` reports it.
+- Both routes are behind the bearer token like every other route except `/health`.
+
 ## Configuration
 
 Works out of the box with three providers of DeepSeek V4.1 Flash. For anything
@@ -248,6 +273,8 @@ pricing page and keep it current. An empty list means "never peaks".
 | `POST /v1/search` · `GET /v1/search?q=` | web search — Brave or DuckDuckGo, no key required |
 | `POST /v1/fetch` · `GET /v1/fetch?url=` | fetch a page and return title + readable text; non-public targets refused |
 | `GET /v1/models` | the configured provider model ids |
+| `GET /api/tags` | the same models in Ollama's shape (`name:tag`, `details`) — for clients that probe for Ollama before trusting a server |
+| `GET /api/version` | Ollama-style version string, so that probe succeeds |
 | `GET /status` | per provider: peak flag, allowance, spend, remaining, `hard_cap`, whether the key is present — plus the live order and breaker state |
 | `GET /health` | liveness, plus which keys are present (never their values) |
 

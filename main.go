@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.2.0"
+const Version = "1.3.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -833,6 +833,10 @@ func newMux() *http.ServeMux {
 	// so a client can point its whole web toolset here instead of a separate key.
 	mux.HandleFunc("/v1/search", withAuth(handleSearch))
 	mux.HandleFunc("/v1/fetch", withAuth(handleFetch))
+	// Ollama-native equivalents of /v1/models: a client that probes for Ollama
+	// before trusting a server finds an answer here instead of a 404.
+	mux.HandleFunc("/api/tags", withAuth(handleOllamaTags))
+	mux.HandleFunc("/api/version", withAuth(handleOllamaVersion))
 	return mux
 }
 
