@@ -17,10 +17,11 @@ const usageJSON = `{"prompt_tokens":1000,"completion_tokens":100,` +
 	`"prompt_tokens_details":{"cached_tokens":800}}`
 
 type upstream struct {
-	mu     sync.Mutex
-	hits   []string        // provider path segment, in order
-	fail   map[string]bool // path segment -> always 500
-	lastUA string
+	mu       sync.Mutex
+	hits     []string        // provider path segment, in order
+	fail     map[string]bool // path segment -> always 500
+	lastUA   string
+	sessions []string // x-opencode-session seen, in order
 }
 
 func (u *upstream) record(p string) bool {
@@ -59,6 +60,7 @@ func newUpstream(t *testing.T) (*upstream, *httptest.Server) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		u.mu.Lock()
 		u.lastUA = r.Header.Get("User-Agent")
+		u.sessions = append(u.sessions, r.Header.Get("x-opencode-session"))
 		u.mu.Unlock()
 		// echo back which model the router asked for, so tests can assert rewrite
 		if stream, _ := body["stream"].(bool); stream {
@@ -353,6 +355,105 @@ func TestUserAgentSent(t *testing.T) {
 	}
 	if strings.Contains(got, "Go-http-client") {
 		t.Error("Go's default User-Agent is the one Cloudflare blocks")
+	}
+}
+
+// OpenCode Go rejects a request with no x-opencode-session ("MissingSessionID")
+// and uses the id to optimise routing and prompt caching. It has to be present,
+// stable for a conversation, and different across conversations.
+func TestSessionHeader(t *testing.T) {
+	up, ups := newUpstream(t)
+	router := setup(t, ups)
+
+	// go must send it, and test routing reaches go at 13:00 (go off-peak).
+	provs["go"].SessionHeader = true
+	atHour(13)
+
+	send := func(content string) {
+		body := fmt.Sprintf(`{"model":"x","messages":[{"role":"system","content":"sys"},`+
+			`{"role":"user","content":%q}]}`, content)
+		resp, err := http.Post(router.URL+"/v1/chat/completions",
+			"application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	send("hello")
+	send("hello")     // same conversation prefix -> same id
+	send("different") // different conversation -> different id
+
+	up.mu.Lock()
+	got := append([]string(nil), up.sessions...)
+	up.mu.Unlock()
+
+	if len(got) != 3 {
+		t.Fatalf("saw %d requests, want 3", len(got))
+	}
+	for i, s := range got {
+		if s == "" {
+			t.Fatalf("request %d carried no x-opencode-session", i)
+		}
+	}
+	if got[0] != got[1] {
+		t.Errorf("session id not stable for the same conversation: %q vs %q", got[0], got[1])
+	}
+	if got[0] == got[2] {
+		t.Errorf("session id identical for a different conversation: %q", got[0])
+	}
+}
+
+// A client that already tracks sessions must have its id preserved.
+func TestSessionHeaderFromClientPreserved(t *testing.T) {
+	up, ups := newUpstream(t)
+	router := setup(t, ups)
+	provs["go"].SessionHeader = true
+	atHour(13)
+
+	body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+	req, err := http.NewRequest(http.MethodPost, router.URL+"/v1/chat/completions",
+		strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-opencode-session", "client-session-abc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	up.mu.Lock()
+	got := up.sessions[len(up.sessions)-1]
+	up.mu.Unlock()
+	if got != "client-session-abc" {
+		t.Errorf("client session id not preserved: %q", got)
+	}
+}
+
+// Providers that do not ask for the header must not receive it.
+func TestSessionHeaderOnlyWhenConfigured(t *testing.T) {
+	up, ups := newUpstream(t)
+	router := setup(t, ups)
+	provs["go"].SessionHeader = false
+	provs["ollama"].SessionHeader = false
+	atHour(13)
+
+	body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(router.URL+"/v1/chat/completions",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	up.mu.Lock()
+	got := up.sessions[len(up.sessions)-1]
+	up.mu.Unlock()
+	if got != "" {
+		t.Errorf("unconfigured provider got x-opencode-session %q", got)
 	}
 }
 

@@ -149,6 +149,13 @@ ROUTER_CONFIG=./config.json ./offpeak-router
 | `rates` | USD per 1M tokens, split into fresh input / cache reads / output |
 | `peak_mult` | multiplier applied during peak. Use `1.0` for a provider that never doubles |
 | `peak_windows_utc` | half-open `[start, end)` UTC hours, **Monday–Friday only**; weekends are fully off-peak |
+| `session_header` | `true` = send `x-opencode-session`, a stable per-conversation id. OpenCode Go **rejects** a request without it |
+| `user_agent` | override the User-Agent for providers that demand a specific one |
+
+The session id is taken from the client's own `x-opencode-session` when present, so
+real session tracking survives the proxy. Otherwise it is derived from the
+conversation prefix (system prompt plus first user turn), which stays stable for
+every later turn without the router holding any state.
 
 `peak_windows_utc` is the whole point of the project, so get it from your provider's
 pricing page and keep it current. An empty list means "never peaks".

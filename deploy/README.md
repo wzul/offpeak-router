@@ -50,6 +50,15 @@ See `nginx.conf.example`. Two lines matter more than the rest:
   vhost that has no certificate yet). Either publish the record **DNS-only**
   for the API hostname, or issue a Cloudflare Origin Certificate instead of
   using ACME.
+- **OpenCode Go refuses a request without `x-opencode-session`** — a bare
+  `HTTP 400 MissingSessionID`. A proxied client that does not send one will fail
+  even though `curl` from the same host works, so set `session_header: true` on
+  that provider.
+- **A Go model can require a region the workspace has not enabled.** The next
+  error after the session id is
+  `This Go model requires Global regions. Select Global in your workspace's Privacy settings`,
+  which is a per-workspace switch in the OpenCode console, not anything the proxy
+  can fix. Check it before debugging the request further.
 - **Never reference a certificate that does not exist yet.** With
   nginx-proxy, a `CERT_NAME` pointing at a missing file makes it emit a broken
   server block, `nginx -t` fails, and the reload takes down every other vhost.

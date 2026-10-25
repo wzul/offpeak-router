@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +33,40 @@ type Provider struct {
 	// UA overrides DefaultUserAgent for providers that demand something
 	// specific. Empty means DefaultUserAgent.
 	UA string
+	// SessionHeader sends x-opencode-session, a stable per-conversation id.
+	// OpenCode Go rejects a request without one ("MissingSessionID") and uses
+	// it to optimise routing and prompt caching.
+	SessionHeader bool
+}
+
+// conversationID derives a stable identifier for the conversation a request
+// belongs to. A client that sends its own x-opencode-session wins, so real
+// session tracking is preserved through the proxy; otherwise the id is derived
+// from the conversation prefix, which is stable for every later turn of the
+// same conversation without the router holding any state.
+func conversationID(r *http.Request, body map[string]any) string {
+	if h := r.Header.Get("x-opencode-session"); h != "" {
+		return h
+	}
+	h := sha256.New()
+	msgs, _ := body["messages"].([]any)
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		switch role {
+		case "system", "developer":
+			fmt.Fprintf(h, "%s\x00%v\x00", role, m["content"])
+		case "user":
+			fmt.Fprintf(h, "%s\x00%v\x00", role, m["content"])
+			goto done
+		}
+	}
+done:
+	sum := hex.EncodeToString(h.Sum(nil))
+	return "offpeak-" + sum[:32]
 }
 
 // defaultProviders is the built-in table, used when no config file is given.
@@ -39,9 +75,10 @@ type Provider struct {
 func defaultProviders() map[string]*Provider {
 	return map[string]*Provider{
 		"go": {
-			Base:   "https://opencode.ai/inference/go/openai/v1",
-			Model:  "deepseek-v4.1-flash",
-			KeyEnv: "OPENCODE_API_KEY",
+			Base:          "https://opencode.ai/inference/go/openai/v1",
+			Model:         "deepseek-v4.1-flash",
+			KeyEnv:        "OPENCODE_API_KEY",
+			SessionHeader: true,
 		},
 		"ollama": {
 			Base:   "https://ollama.com/v1",
@@ -381,6 +418,9 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 		ua = DefaultUserAgent
 	}
 	req.Header.Set("User-Agent", ua)
+	if p.SessionHeader {
+		req.Header.Set("x-opencode-session", conversationID(r, body))
+	}
 
 	resp, err := httpc.Do(req)
 	if err != nil {

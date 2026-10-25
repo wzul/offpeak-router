@@ -7,6 +7,7 @@
       "base_url": "https://opencode.ai/inference/go/openai/v1",
       "model": "deepseek-v4.1-flash",
       "api_key_env": "OPENCODE_API_KEY",
+      "session_header": true,
       "monthly_allowance_usd": 80,
       "hard_cap": true,
       "rates": { "in": 0.15, "cache": 0.003, "out": 0.60, "peak_mult": 2.0 },
