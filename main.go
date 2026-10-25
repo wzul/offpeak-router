@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.4.0"
+const Version = "1.4.1"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and

@@ -133,8 +133,9 @@ func renderOllamaOnce(w http.ResponseWriter, body io.Reader, name, model, client
 	var env struct {
 		Choices []struct {
 			Message struct {
-				Content   string           `json:"content"`
-				ToolCalls []map[string]any `json:"tool_calls"`
+				Content          string           `json:"content"`
+				ReasoningContent string           `json:"reasoning_content"`
+				ToolCalls        []map[string]any `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -150,8 +151,17 @@ func renderOllamaOnce(w http.ResponseWriter, body io.Reader, name, model, client
 		c := env.Choices[0]
 		if kind == "generate" {
 			out["response"] = c.Message.Content
+			if c.Message.ReasoningContent != "" {
+				out["thinking"] = c.Message.ReasoningContent
+			}
 		} else {
 			msg := map[string]any{"role": "assistant", "content": c.Message.Content}
+			if c.Message.ReasoningContent != "" {
+				// Ollama calls this "thinking"; an OpenAI upstream calls it
+				// reasoning_content. Dropping it makes a thinking model look mute,
+				// because with a small token budget the content can be empty.
+				msg["thinking"] = c.Message.ReasoningContent
+			}
 			if len(c.Message.ToolCalls) > 0 {
 				msg["tool_calls"] = c.Message.ToolCalls
 			}
@@ -189,8 +199,9 @@ func renderOllamaStream(w http.ResponseWriter, body io.Reader, name, model, clie
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string           `json:"content"`
-					ToolCalls []map[string]any `json:"tool_calls"`
+					Content          string           `json:"content"`
+					ReasoningContent string           `json:"reasoning_content"`
+					ToolCalls        []map[string]any `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage *usageBlock `json:"usage"`
@@ -205,14 +216,23 @@ func renderOllamaStream(w http.ResponseWriter, body io.Reader, name, model, clie
 			continue
 		}
 		delta := chunk.Choices[0].Delta
-		if delta.Content == "" && len(delta.ToolCalls) == 0 {
+		if delta.Content == "" && delta.ReasoningContent == "" && len(delta.ToolCalls) == 0 {
 			continue
 		}
 		line := ollamaEnvelope(clientModel)
 		if kind == "generate" {
 			line["response"] = delta.Content
+			if delta.ReasoningContent != "" {
+				line["thinking"] = delta.ReasoningContent
+			}
 		} else {
 			msg := map[string]any{"role": "assistant", "content": delta.Content}
+			if delta.ReasoningContent != "" {
+				// Reasoning-only chunks must still reach the client: with a tight
+				// token budget they are the entire reply, and dropping them makes a
+				// working model look like it hung.
+				msg["thinking"] = delta.ReasoningContent
+			}
 			if len(delta.ToolCalls) > 0 {
 				msg["tool_calls"] = delta.ToolCalls
 			}

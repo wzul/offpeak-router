@@ -200,6 +200,43 @@ curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/api/
   still rejects a chat request, exactly as `/v1/models` reports it.
 - Both routes are behind the bearer token like every other route except `/health`.
 
+### Speaking Ollama's chat dialect
+
+Discovery alone was not enough: a client that found the router through `/api/tags`
+then POSTed `/api/chat` and got a 404. Both chat routes now translate in either
+direction, with the same bearer token and the same spend ledger:
+
+```bash
+# streams NDJSON by default, exactly like Ollama
+curl -s -X POST http://127.0.0.1:8788/api/chat \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],
+       "options":{"num_predict":64,"temperature":0.4}}'
+# {"model":"deepseek-v4.1-flash:latest","created_at":"…","done":false,
+#  "message":{"role":"assistant","content":"…"}}
+# … {"done":true,"done_reason":"stop","prompt_eval_count":41,"eval_count":22}
+
+curl -s -X POST http://127.0.0.1:8788/api/generate \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4.1-flash","prompt":"say hi","stream":false}'
+```
+
+- **Routing, failover, breakers and billing are the `/v1` code path.** A client must
+  not get different routing because it chose the other dialect; `X-Router-*` headers
+  and `/status` counters are identical.
+- **Streaming is the default**, as in Ollama. A missing `stream` field means NDJSON,
+  so a single JSON document is only ever sent when `stream:false` is explicit.
+- **Options are mapped, unknown ones dropped** — `temperature`, `top_p`, `seed`,
+  `num_predict`→`max_tokens`, `stop`. `top_k` has no OpenAI equivalent and forwarding
+  it earns a 400 that would be blamed on the provider.
+- **Reasoning is surfaced as `message.thinking`** (Ollama's field), because an upstream
+  sends it as `reasoning_content` and a thinking model with a small budget can finish
+  with empty `content` — dropping the reasoning makes a working reply look empty.
+- **`format:"json"` sets `response_format:"json_object"`**; images carried as bare
+  base64 are turned into data URLs with the media type sniffed from the bytes.
+- **A decision model is refused on `/api/chat`** with a 400 naming `/v1/systemone`,
+  and an unknown model answers Ollama's own 404 wording.
+
 ## Configuration
 
 Works out of the box with three providers of DeepSeek V4.1 Flash. For anything
@@ -275,6 +312,8 @@ pricing page and keep it current. An empty list means "never peaks".
 | `GET /v1/models` | the configured provider model ids |
 | `GET /api/tags` | the same models in Ollama's shape (`name:tag`, `details`) — for clients that probe for Ollama before trusting a server |
 | `GET /api/version` | Ollama-style version string, so that probe succeeds |
+| `POST /api/chat` · `POST /api/generate` | chat in Ollama's dialect — request translated to the OpenAI payload, answer translated back (NDJSON when streaming) |
+| `POST /api/show` · `POST /api/ps` | model details from the table; nothing is ever resident locally |
 | `GET /status` | per provider: peak flag, allowance, spend, remaining, `hard_cap`, whether the key is present — plus the live order and breaker state |
 | `GET /health` | liveness, plus which keys are present (never their values) |
 
