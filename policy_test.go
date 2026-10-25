@@ -108,8 +108,8 @@ func TestPeakWindowsDisjoint(t *testing.T) {
 
 func TestPeakIsDoubleOffPeak(t *testing.T) {
 	for _, p := range []string{"go", "ollama"} {
-		off := requestCost(p, 6801, 170536, 880, false)
-		pk := requestCost(p, 6801, 170536, 880, true)
+		off := requestCost(p, "", 6801, 170536, 880, false)
+		pk := requestCost(p, "", 6801, 170536, 880, true)
 		if diff := pk - 2*off; diff > 1e-12 || diff < -1e-12 {
 			t.Errorf("%s peak %.9f != 2x off-peak %.9f", p, pk, off)
 		}
@@ -117,9 +117,9 @@ func TestPeakIsDoubleOffPeak(t *testing.T) {
 }
 
 func TestNousCheaperOnlyAtOllamaPeak(t *testing.T) {
-	ollOff := requestCost("ollama", 6801, 170536, 880, false)
-	ollPk := requestCost("ollama", 6801, 170536, 880, true)
-	nous := requestCost("nous", 6801, 170536, 880, false)
+	ollOff := requestCost("ollama", "", 6801, 170536, 880, false)
+	ollPk := requestCost("ollama", "", 6801, 170536, 880, true)
+	nous := requestCost("nous", "", 6801, 170536, 880, false)
 
 	if !(ollOff < nous) {
 		t.Error("ollama off-peak should be cheaper than nous")
@@ -152,7 +152,7 @@ func TestCandidateOrder(t *testing.T) {
 		{"both dead 13:00 -> nous", mon(13), bothDead, "nous"},
 	}
 	for _, c := range cases {
-		got := candidateOrder(c.at, c.spent)
+		got := candidateOrder(c.at, c.spent, "")
 		if got[0] != c.want {
 			t.Errorf("%s: first = %q, want %q (order %v)", c.name, got[0], c.want, got)
 		}
@@ -162,7 +162,7 @@ func TestCandidateOrder(t *testing.T) {
 func TestOrderAlwaysComplete(t *testing.T) {
 	fresh := zero()
 	for h := 0; h < 24; h++ {
-		order := candidateOrder(mon(h), fresh)
+		order := candidateOrder(mon(h), fresh, "")
 		seen := map[string]bool{}
 		for _, p := range order {
 			if seen[p] {
@@ -183,7 +183,7 @@ func TestOrderAlwaysComplete(t *testing.T) {
 func TestHardCappedProviderDropped(t *testing.T) {
 	spent := map[string]float64{"go": 80, "ollama": 0, "nous": 0}
 	for h := 0; h < 24; h++ {
-		for _, p := range candidateOrder(mon(h), spent) {
+		for _, p := range candidateOrder(mon(h), spent, "") {
 			if p == "go" {
 				t.Fatalf("%02d:00: exhausted hard-capped go still in the order", h)
 			}
@@ -195,7 +195,7 @@ func TestHardCappedProviderDropped(t *testing.T) {
 func TestTopupProviderSurvives(t *testing.T) {
 	spent := map[string]float64{"go": 80, "ollama": 60, "nous": 0}
 	found := false
-	for _, p := range candidateOrder(mon(2), spent) {
+	for _, p := range candidateOrder(mon(2), spent, "") {
 		if p == "ollama" {
 			found = true
 		}
@@ -232,7 +232,7 @@ func TestArbitraryProviderSet(t *testing.T) {
 	rates["alpha"] = Rates{0.10, 0.001, 0.40, 2.0}
 	rates["beta"] = Rates{0.20, 0.002, 0.80, 2.0}
 
-	order := candidateOrder(mon(2), map[string]float64{"alpha": 0, "beta": 0})
+	order := candidateOrder(mon(2), map[string]float64{"alpha": 0, "beta": 0}, "")
 	if len(order) != 2 {
 		t.Fatalf("order = %v, want both providers", order)
 	}

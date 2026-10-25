@@ -62,8 +62,23 @@ func isPeak(provider string, now time.Time) bool {
 	return false
 }
 
-func requestCost(provider string, inTok, cacheTok, outTok float64, peak bool) float64 {
+// ratesFor returns the rate card to use for a provider serving a particular
+// canonical model. A per-model override on that provider wins, because one
+// provider can host several models at very different prices.
+func ratesFor(provider, model string) (Rates, bool) {
+	if model != "" {
+		if p, ok := provs[provider]; ok {
+			if r, ok := p.Models[model]; ok && r.Rates != nil {
+				return *r.Rates, true
+			}
+		}
+	}
 	r, ok := rates[provider]
+	return r, ok
+}
+
+func requestCost(provider, model string, inTok, cacheTok, outTok float64, peak bool) float64 {
+	r, ok := ratesFor(provider, model)
 	if !ok {
 		return 0
 	}
@@ -91,7 +106,43 @@ func hasAllowance(provider string, spent map[string]float64) bool {
 	return !capped || r > 0
 }
 
+// servesModel reports whether a provider can serve the canonical model. A
+// provider with no explicit model table serves exactly one model, its Model.
+func servesModel(provider, model string) bool {
+	p, ok := provs[provider]
+	if !ok {
+		return false
+	}
+	if len(p.Models) == 0 {
+		return p.Model == model
+	}
+	_, ok = p.Models[model]
+	return ok
+}
+
+// upstreamModel maps a canonical model to the id that provider expects. This is
+// why the model table exists: the same model is spelled differently by each
+// provider (deepseek-v4.1-flash vs deepseek-v4.1-flash:1017), and a client
+// asking for one name must not have to track the others.
+func upstreamModel(provider, canonical string) string {
+	p, ok := provs[provider]
+	if !ok {
+		return canonical
+	}
+	if len(p.Models) == 0 {
+		return p.Model
+	}
+	if r, ok := p.Models[canonical]; ok && r.ID != "" {
+		return r.ID
+	}
+	return canonical
+}
+
 // candidateOrder returns provider names best-first.
+//
+// model is the canonical model the request asked for (already resolved). An
+// empty model means "do not filter", which the policy tests use to prove the
+// ordering itself names no provider.
 //
 // Tiers, in order:
 //
@@ -108,15 +159,18 @@ type cand struct {
 	cost float64
 }
 
-func candidateOrder(now time.Time, spent map[string]float64) []string {
+func candidateOrder(now time.Time, spent map[string]float64, model string) []string {
 	var offPeak, atPeak, metered []cand
 	// usable records which providers may serve at any price. The failover chain
 	// is appended last and must not resurrect one that was deliberately dropped.
 	usable := make(map[string]bool, len(provs))
 
 	for name := range provs {
+		if model != "" && !servesModel(name, model) {
+			continue
+		}
 		peak := isPeak(name, now)
-		cost := requestCost(name, 6801, 170536, 880, peak)
+		cost := requestCost(name, model, 6801, 170536, 880, peak)
 		r, capped := remaining(name, spent)
 
 		switch {

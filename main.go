@@ -12,13 +12,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -26,9 +27,32 @@ const Version = "1.0.0"
 // looks like a bot wall to the upstream.
 const DefaultUserAgent = "offpeak-router/" + Version
 
+// ModelRoute is one model a provider can serve: the id the provider expects,
+// plus an optional rate override for providers whose models are priced apart.
+type ModelRoute struct {
+	ID    string
+	Rates *Rates
+	// API is the endpoint family the model speaks. Most models are chat
+	// completions; a decision model like clef only answers /v1/systemone, and
+	// offering it on the chat route would produce an upstream 400 on every call.
+	API string
+}
+
+// Endpoint families a model can belong to.
+const (
+	APIChat      = "chat"
+	APISystemOne = "systemone"
+)
+
 type Provider struct {
-	Base   string
-	Model  string
+	Base string
+	// Model is the single canonical model when Models is empty. It is kept so a
+	// provider that serves one model stays a one-line entry in a config file.
+	Model string
+	// Models maps a canonical model name to what this provider calls it. This is
+	// the whole point of the table: the clients ask for one stable name and each
+	// provider gets its own spelling.
+	Models map[string]ModelRoute
 	KeyEnv string
 	// UA overrides DefaultUserAgent for providers that demand something
 	// specific. Empty means DefaultUserAgent.
@@ -69,28 +93,134 @@ done:
 	return "offpeak-" + sum[:32]
 }
 
+// canonicalModel is the model a request gets when it asks for nothing. Clients
+// that hardcode a provider-specific id keep working: resolveModel accepts those
+// as aliases.
+var canonicalModel = "deepseek-v4.1-flash"
+
+// clefRates is Ollama's published clef pricing — input only, $0.24/M. Cached and
+// output are not published, so they are charged at the same rate rather than at
+// zero, which would make the ledger under-report real spend.
+var clefRates = Rates{In: 0.24, Cache: 0.24, Out: 0.24, PeakMult: 1.0}
+
 // defaultProviders is the built-in table, used when no config file is given.
-// These three all serve DeepSeek V4.1 Flash; swap them in a config file for
-// anything else.
+// Every provider here serves deepseek-v4.1-flash under its own id; Ollama
+// additionally serves clef, which no other provider has.
 func defaultProviders() map[string]*Provider {
 	return map[string]*Provider{
 		"go": {
-			Base:          "https://opencode.ai/inference/go/openai/v1",
-			Model:         "deepseek-v4.1-flash",
+			Base: "https://opencode.ai/inference/go/openai/v1",
+			Models: map[string]ModelRoute{
+				"deepseek-v4.1-flash": {ID: "deepseek-v4.1-flash"},
+			},
 			KeyEnv:        "OPENCODE_API_KEY",
 			SessionHeader: true,
 		},
 		"ollama": {
-			Base:   "https://ollama.com/v1",
-			Model:  "deepseek-v4.1-flash:1017",
+			Base: "https://ollama.com/v1",
+			Models: map[string]ModelRoute{
+				"deepseek-v4.1-flash": {ID: "deepseek-v4.1-flash:1017"},
+				"clef":                {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
+			},
 			KeyEnv: "OLLAMA_API_KEY",
 		},
 		"nous": {
-			Base:   "https://inference-api.nousresearch.com/v1",
-			Model:  "deepseek/deepseek-v4.1-flash-1017",
+			Base: "https://inference-api.nousresearch.com/v1",
+			Models: map[string]ModelRoute{
+				"deepseek-v4.1-flash": {ID: "deepseek/deepseek-v4.1-flash-1017"},
+			},
 			KeyEnv: "NOUS_API_KEY",
 		},
 	}
+}
+
+// resolveModel maps a requested model name to the canonical name to route on.
+// Both canonical names and any provider's upstream id are accepted, so a client
+// that asks for deepseek-v4.1-flash:1017 keeps working after the alias table
+// exists. An unknown name is refused rather than silently served by a different
+// model — a substitution the caller cannot see is worse than an error.
+func resolveModel(requested string) (string, bool) {
+	if requested == "" || requested == "default" {
+		if defaultServed() != "" {
+			return canonicalModel, true
+		}
+		return "", false
+	}
+	for _, p := range provs {
+		if len(p.Models) == 0 {
+			if p.Model == requested {
+				return requested, true
+			}
+			continue
+		}
+		if _, ok := p.Models[requested]; ok {
+			return requested, true
+		}
+	}
+	for _, p := range provs {
+		for canonical, route := range p.Models {
+			if route.ID == requested {
+				return canonical, true
+			}
+		}
+	}
+	return "", false
+}
+
+// defaultServed returns the canonical model in effect, falling back to any
+// served model when the configured default is not offered by any provider.
+func defaultServed() string {
+	for name := range provs {
+		if servesModel(name, canonicalModel) {
+			return canonicalModel
+		}
+	}
+	ms := availableModels()
+	if len(ms) > 0 {
+		return ms[0]
+	}
+	return ""
+}
+
+// modelAPI returns the endpoint family a canonical model speaks, defaulting to
+// chat. The answer comes from whichever provider declares it.
+func modelAPI(canonical string) string {
+	for name := range provs {
+		p := provs[name]
+		if r, ok := p.Models[canonical]; ok {
+			if r.API == "" {
+				return APIChat
+			}
+			return r.API
+		}
+		if len(p.Models) == 0 && p.Model == canonical {
+			return APIChat
+		}
+	}
+	return APIChat
+}
+
+// availableModels lists every canonical model any loaded provider can serve.
+func availableModels() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range provs {
+		if len(p.Models) == 0 {
+			if !seen[p.Model] {
+				seen[p.Model] = true
+				out = append(out, p.Model)
+			}
+			continue
+		}
+		for m := range p.Models {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // applyEnvOverrides lets a single provider be retargeted without a config file,
@@ -103,6 +233,12 @@ func applyEnvOverrides() {
 		}
 		if v := os.Getenv("ROUTER_" + up + "_MODEL"); v != "" {
 			p.Model = v
+			// With a model table the meaningful override is the upstream id of
+			// the canonical model; setting Model alone would be ignored.
+			if r, ok := p.Models[canonicalModel]; ok {
+				r.ID = v
+				p.Models[canonicalModel] = r
+			}
 		}
 		if v := os.Getenv("ROUTER_" + up + "_UA"); v != "" {
 			p.UA = v
@@ -226,9 +362,9 @@ var (
 	}
 )
 
-func record(provider string, u *usageBlock, now time.Time) float64 {
+func record(provider, model string, u *usageBlock, now time.Time) float64 {
 	in, cache, out := splitUsage(u)
-	cost := requestCost(provider, in, cache, out, isPeak(provider, now))
+	cost := requestCost(provider, model, in, cache, out, isPeak(provider, now))
 	led.Add(now, provider, cost)
 	return cost
 }
@@ -303,20 +439,31 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{
-		"now_utc":   now.Format("2006-01-02 15:04:05"),
-		"weekday":   int(now.Weekday()),
-		"providers": prov,
-		"order":     candidateOrder(now, spent),
-		"shadow":    shadow,
-		"breakers":  breakerSnapshot(),
+		"now_utc":       now.Format("2006-01-02 15:04:05"),
+		"weekday":       int(now.Weekday()),
+		"providers":     prov,
+		"order":         candidateOrder(now, spent, ""),
+		"models":        availableModels(),
+		"default_model": defaultServed(),
+		"shadow":        shadow,
+		"breakers":      breakerSnapshot(),
 	})
 }
 
 func handleModels(w http.ResponseWriter, _ *http.Request) {
 	var data []map[string]any
-	for name, p := range provs {
+	for _, m := range availableModels() {
+		var by []string
+		for name := range provs {
+			if servesModel(name, m) {
+				by = append(by, name)
+			}
+		}
+		sort.Strings(by)
 		data = append(data, map[string]any{
-			"id": p.Model, "object": "model", "owned_by": name})
+			"id": m, "object": "model", "owned_by": "offpeak-router",
+			"providers": by, "api": modelAPI(m),
+		})
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -334,17 +481,54 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := body["stream"].(bool)
 	now := nowFn()
-	order := candidateOrder(now, led.Spent(now))
+
+	requested, _ := body["model"].(string)
+	model, ok := resolveModel(requested)
+	if !ok {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{
+			"message":   "unknown model: " + requested,
+			"type":      "invalid_request_error",
+			"available": availableModels(),
+		}})
+		return
+	}
+
+	order := candidateOrder(now, led.Spent(now), model)
+
+	// A decision model has no chat completions endpoint upstream: sending it
+	// here would fail with a 400 on every attempt and blame the provider.
+	if api := modelAPI(model); api != APIChat {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{
+			"message": model + " is a " + api + " model; call /v1/" + api + " instead",
+			"type":    "invalid_request_error",
+			"model":   model,
+			"api":     api,
+		}})
+		return
+	}
 
 	if shadow {
 		peak := map[string]bool{}
 		for name := range provs {
 			peak[name] = isPeak(name, now)
 		}
+		would := ""
+		if len(order) > 0 {
+			would = order[0]
+		}
 		writeJSON(w, 200, map[string]any{
-			"shadow": true, "order": order, "would_use": order[0],
-			"peak": peak, "body_model": body["model"],
+			"shadow": true, "order": order, "would_use": would,
+			"peak": peak, "body_model": body["model"], "model": model,
 		})
+		return
+	}
+
+	if len(order) == 0 {
+		writeJSON(w, 503, map[string]any{"error": map[string]any{
+			"message": "no provider can serve " + model + " right now",
+			"type":    "insufficient_capacity",
+			"model":   model,
+		}})
 		return
 	}
 
@@ -366,7 +550,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		if anyFailover {
 			w.Header().Set("X-Router-Failover", "true")
 		}
-		if err := forward(w, r, name, p, key, body, stream, now); err == nil {
+		if err := forward(w, r, name, p, key, body, stream, now, model); err == nil {
 			breakerOK(name)
 			return
 		} else {
@@ -382,17 +566,169 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// systemOneUsage is this API's usage block: plain input and output token
+// counts, with no cache accounting to split.
+type systemOneUsage struct {
+	PromptTokens     int `json:"input_tokens"`
+	CompletionTokens int `json:"output_tokens"`
+}
+
+// recordTokens bills a non-chat call, whose usage arrives as bare token counts.
+func recordTokens(provider, model string, in, out int, now time.Time) float64 {
+	cost := requestCost(provider, model, float64(in), 0, float64(out), isPeak(provider, now))
+	led.Add(now, provider, cost)
+	return cost
+}
+
+// handleSystemOne serves decision models: one state plus a schema of typed
+// questions, answered in a single pass. There is no streaming, no tools and no
+// generation controls on this API, so nothing has to be negotiated.
+func handleSystemOne(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "bad json"})
+		return
+	}
+	now := nowFn()
+	requested, _ := body["model"].(string)
+	model, ok := resolveModel(requested)
+	if !ok {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{
+			"message":   "unknown model: " + requested,
+			"type":      "invalid_request_error",
+			"available": availableModels(),
+		}})
+		return
+	}
+	if api := modelAPI(model); api != APISystemOne {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{
+			"message": model + " is a " + api + " model; call /v1/chat/completions instead",
+			"type":    "invalid_request_error",
+			"model":   model,
+			"api":     api,
+		}})
+		return
+	}
+
+	order := candidateOrder(now, led.Spent(now), model)
+	if len(order) == 0 {
+		writeJSON(w, 503, map[string]any{"error": map[string]any{
+			"message": "no provider can serve " + model + " right now",
+			"type":    "insufficient_capacity", "model": model,
+		}})
+		return
+	}
+
+	var attempts []map[string]string
+	anyFailover := false
+	for _, name := range order {
+		p := provs[name]
+		key := os.Getenv(p.KeyEnv)
+		if key == "" {
+			attempts = append(attempts, map[string]string{"provider": name, "error": "no api key"})
+			continue
+		}
+		if breakerOpen(name) {
+			attempts = append(attempts, map[string]string{"provider": name, "error": "circuit open"})
+			continue
+		}
+		if anyFailover {
+			w.Header().Set("X-Router-Failover", "true")
+		}
+		if err := forwardSystemOne(w, r, name, p, key, body, now, model); err == nil {
+			breakerOK(name)
+			return
+		} else {
+			log.Printf("provider %s failed: %v", name, err)
+			breakerFail(name)
+			anyFailover = true
+			attempts = append(attempts, map[string]string{
+				"provider": name, "error": err.Error()})
+		}
+	}
+	writeJSON(w, 502, map[string]any{
+		"error": map[string]any{"message": "all providers failed", "attempts": attempts},
+	})
+}
+
+// forwardSystemOne posts one decision request and bills it from its own usage
+// block. It mirrors forward()'s contract: headers are only written once the
+// upstream has actually succeeded.
+func forwardSystemOne(w http.ResponseWriter, r *http.Request, name string,
+	p *Provider, key string, body map[string]any, now time.Time, model string) error {
+
+	payload := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		payload[k] = v
+	}
+	payload["model"] = upstreamModel(name, model)
+
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode body: %w", err)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		p.Base+"/systemone", bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	ua := p.UA
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	req.Header.Set("User-Agent", ua)
+	if p.SessionHeader {
+		req.Header.Set("x-opencode-session", conversationID(r, body))
+	}
+
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return fmt.Errorf("transport: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	var env struct {
+		Usage systemOneUsage `json:"usage"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	cost := recordTokens(name, model, env.Usage.PromptTokens, env.Usage.CompletionTokens, now)
+
+	w.Header().Set("X-Router-Provider", name)
+	w.Header().Set("X-Router-Model", model)
+	w.Header().Set("X-Router-Usd", fmt.Sprintf("%.6f", cost))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(raw)
+	return nil
+}
+
 // forward writes a complete response to w and returns nil, or returns the
 // error without touching w. Callers need the real cause: a bare "upstream
 // failed" made a working provider look broken.
 func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
-	key string, body map[string]any, stream bool, now time.Time) error {
+	key string, body map[string]any, stream bool, now time.Time, model string) error {
 
 	payload := make(map[string]any, len(body)+2)
 	for k, v := range body {
 		payload[k] = v
 	}
-	payload["model"] = p.Model
+	// The client asks for a canonical model; each provider gets the id it
+	// actually knows. This line is the whole reason the model table exists.
+	payload["model"] = upstreamModel(name, model)
 	if stream {
 		opts, _ := payload["stream_options"].(map[string]any)
 		if opts == nil {
@@ -434,6 +770,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 	}
 
 	w.Header().Set("X-Router-Provider", name)
+	w.Header().Set("X-Router-Model", model)
 
 	if !stream {
 		raw, err := io.ReadAll(resp.Body)
@@ -442,7 +779,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 		}
 		var env usageEnvelope
 		_ = json.Unmarshal(raw, &env)
-		cost := record(name, env.Usage, now)
+		cost := record(name, model, env.Usage, now)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Usd", fmt.Sprintf("%.6f", cost))
 		w.WriteHeader(200)
@@ -473,7 +810,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 			flusher.Flush()
 		}
 	}
-	record(name, captured, now)
+	record(name, model, captured, now)
 	return nil
 }
 
@@ -486,6 +823,7 @@ func newMux() *http.ServeMux {
 	mux.HandleFunc("/status", withAuth(handleStatus))
 	mux.HandleFunc("/v1/models", withAuth(handleModels))
 	mux.HandleFunc("/v1/chat/completions", withAuth(handleChat))
+	mux.HandleFunc("/v1/systemone", withAuth(handleSystemOne))
 	return mux
 }
 

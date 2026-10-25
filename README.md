@@ -87,14 +87,52 @@ curl -s http://127.0.0.1:8788/v1/chat/completions \
   -d '{"model":"anything","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-The `model` field in the request is ignored — the router substitutes the model id
-each provider expects. Response headers tell you what happened:
+The `model` field selects the model — the router sends each provider the id that
+provider uses for it. Ask for `deepseek-v4.1-flash` and OpenCode Go, Ollama and
+Nous each receive their own spelling; ask for a model only one of them has and
+only that one is tried. An unknown model is a `400` listing what exists, never a
+silent substitution. Response headers tell you what happened:
 
 ```
 X-Router-Provider: ollama
+X-Router-Model: deepseek-v4.1-flash
 X-Router-Usd: 0.002069
 X-Router-Failover: false
 ```
+
+### Models and endpoint families
+
+`GET /v1/models` lists every canonical model, the providers that can serve it,
+and the endpoint family it speaks:
+
+```json
+{"id": "clef", "api": "systemone", "providers": ["ollama"]}
+```
+
+A decision model answers on `/v1/systemone` — one state plus a schema of typed
+questions, no chat messages — so it is refused on `/v1/chat/completions` and
+vice versa. Both routes share the same auth, failover and billing:
+
+```bash
+curl -s http://127.0.0.1:8788/v1/systemone \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"clef","state":"I was charged twice, please refund me.",
+       "questions":{"refund":{"type":"noul","instructions":"Is a refund requested?"}}}'
+```
+
+A provider can price its models apart, which matters when one provider hosts both
+a cheap chat model and an expensive one:
+
+```json
+"models": {
+  "deepseek-v4.1-flash": {"id": "deepseek-v4.1-flash:1017"},
+  "clef": {"id": "clef:27b", "api": "systemone",
+           "rates": {"in": 0.24, "cache": 0.24, "out": 0.24, "peak_mult": 1.0}}
+}
+```
+
+`id` defaults to the canonical name and `rates` to the provider's block, so the
+short form `{"model": "x"}` still works for a one-model provider.
 
 ### Check the decision without spending anything
 

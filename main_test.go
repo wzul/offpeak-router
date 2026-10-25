@@ -62,6 +62,13 @@ func newUpstream(t *testing.T) (*upstream, *httptest.Server) {
 		u.lastUA = r.Header.Get("User-Agent")
 		u.sessions = append(u.sessions, r.Header.Get("x-opencode-session"))
 		u.mu.Unlock()
+		// Decision models answer on a different shape entirely.
+		if strings.HasSuffix(r.URL.Path, "/systemone") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"model":%q,"answers":{"ok":{"type":"noul","noul":0.99}},`+
+				`"usage":{"input_tokens":1000,"output_tokens":0}}`, body["model"])
+			return
+		}
 		// echo back which model the router asked for, so tests can assert rewrite
 		if stream, _ := body["stream"].(bool); stream {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -92,9 +99,15 @@ func setup(t *testing.T, up *httptest.Server) *httptest.Server {
 	t.Cleanup(func() { provs = origProvs })
 
 	provs = map[string]*Provider{
-		"go":     {Base: up.URL + "/go/v1", Model: "mock-go", KeyEnv: "OPENCODE_API_KEY"},
-		"ollama": {Base: up.URL + "/ollama/v1", Model: "mock-ollama", KeyEnv: "OLLAMA_API_KEY"},
-		"nous":   {Base: up.URL + "/nous/v1", Model: "mock-nous", KeyEnv: "NOUS_API_KEY"},
+		// All three serve one canonical model under their own upstream id, which
+		// is exactly the shape production has: one name for the client, three
+		// spellings for the providers.
+		"go": {Base: up.URL + "/go/v1", KeyEnv: "OPENCODE_API_KEY",
+			Models: map[string]ModelRoute{"mock-model": {ID: "mock-go"}}},
+		"ollama": {Base: up.URL + "/ollama/v1", KeyEnv: "OLLAMA_API_KEY",
+			Models: map[string]ModelRoute{"mock-model": {ID: "mock-ollama"}}},
+		"nous": {Base: up.URL + "/nous/v1", KeyEnv: "NOUS_API_KEY",
+			Models: map[string]ModelRoute{"mock-model": {ID: "mock-nous"}}},
 	}
 	led = NewLedger(filepath.Join(t.TempDir(), "spend.json"))
 	breakers = map[string]*breakerEntry{}
@@ -109,7 +122,7 @@ func setup(t *testing.T, up *httptest.Server) *httptest.Server {
 
 func ask(t *testing.T, router *httptest.Server, stream bool) (*http.Response, []byte) {
 	t.Helper()
-	payload := fmt.Sprintf(`{"model":"client-said-this","stream":%v,`+
+	payload := fmt.Sprintf(`{"model":"mock-model","stream":%v,`+
 		`"messages":[{"role":"user","content":"hi"}]}`, stream)
 	resp, err := http.Post(router.URL+"/v1/chat/completions",
 		"application/json", strings.NewReader(payload))
@@ -370,7 +383,7 @@ func TestSessionHeader(t *testing.T) {
 	atHour(13)
 
 	send := func(content string) {
-		body := fmt.Sprintf(`{"model":"x","messages":[{"role":"system","content":"sys"},`+
+		body := fmt.Sprintf(`{"model":"mock-model","messages":[{"role":"system","content":"sys"},`+
 			`{"role":"user","content":%q}]}`, content)
 		resp, err := http.Post(router.URL+"/v1/chat/completions",
 			"application/json", strings.NewReader(body))
@@ -411,7 +424,7 @@ func TestSessionHeaderFromClientPreserved(t *testing.T) {
 	provs["go"].SessionHeader = true
 	atHour(13)
 
-	body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}`
 	req, err := http.NewRequest(http.MethodPost, router.URL+"/v1/chat/completions",
 		strings.NewReader(body))
 	if err != nil {
@@ -441,7 +454,7 @@ func TestSessionHeaderOnlyWhenConfigured(t *testing.T) {
 	provs["ollama"].SessionHeader = false
 	atHour(13)
 
-	body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}`
 	resp, err := http.Post(router.URL+"/v1/chat/completions",
 		"application/json", strings.NewReader(body))
 	if err != nil {
@@ -467,7 +480,7 @@ func TestAuthRequired(t *testing.T) {
 	atHour(0)
 
 	post := func(auth string) int {
-		body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+		body := `{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}`
 		req, err := http.NewRequest(http.MethodPost,
 			router.URL+"/v1/chat/completions", strings.NewReader(body))
 		if err != nil {
@@ -565,8 +578,17 @@ func TestStaticEndpoints(t *testing.T) {
 	var models struct{ Data []map[string]any }
 	_ = json.NewDecoder(resp.Body).Decode(&models)
 	resp.Body.Close()
-	if len(models.Data) != 3 {
-		t.Errorf("models = %d, want 3", len(models.Data))
+	// One canonical entry, not one per provider: the client asks for a name, not
+	// for an upstream spelling. The provider list is what varies.
+	if len(models.Data) != 1 {
+		t.Fatalf("models = %d, want 1 canonical entry", len(models.Data))
+	}
+	if id, _ := models.Data[0]["id"].(string); id != "mock-model" {
+		t.Errorf("model id = %q, want mock-model", id)
+	}
+	by, _ := models.Data[0]["providers"].([]any)
+	if len(by) != 3 {
+		t.Errorf("providers = %v, want all 3", models.Data[0]["providers"])
 	}
 
 	resp, err = http.Get(router.URL + "/status")

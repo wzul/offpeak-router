@@ -40,17 +40,29 @@ type Config struct {
 	Listen        string                    `json:"listen"`
 	Ledger        string                    `json:"ledger"`
 	FallbackOrder []string                  `json:"fallback_order"`
+	DefaultModel  string                    `json:"default_model"`
 	Providers     map[string]ProviderConfig `json:"providers"`
 }
 
+// ModelConfig is one entry of a provider's model table. id defaults to the
+// canonical name, and rates default to the provider's own rates.
+type ModelConfig struct {
+	ID    string `json:"id"`
+	Rates *Rates `json:"rates"`
+	// API is "chat" (default) or "systemone". A decision model only answers the
+	// latter, and mislabelling it costs an upstream 400 on every request.
+	API string `json:"api"`
+}
+
 type ProviderConfig struct {
-	Name          string   `json:"name"`
-	BaseURL       string   `json:"base_url"`
-	Model         string   `json:"model"`
-	APIKeyEnv     string   `json:"api_key_env"`
-	UserAgent     string   `json:"user_agent"`
-	SessionHeader bool     `json:"session_header"`
-	MonthlyAllow  *float64 `json:"monthly_allowance_usd"`
+	Name          string                 `json:"name"`
+	BaseURL       string                 `json:"base_url"`
+	Model         string                 `json:"model"`
+	Models        map[string]ModelConfig `json:"models"`
+	APIKeyEnv     string                 `json:"api_key_env"`
+	UserAgent     string                 `json:"user_agent"`
+	SessionHeader bool                   `json:"session_header"`
+	MonthlyAllow  *float64               `json:"monthly_allowance_usd"`
 	// HardCap means the allowance cannot be exceeded: once spent, the provider
 	// is dropped. Omit it for a subscription you can top up past the allowance.
 	HardCap        bool     `json:"hard_cap"`
@@ -83,6 +95,9 @@ func applyConfig(c *Config) error {
 	if len(c.FallbackOrder) > 0 {
 		failoverChain = c.FallbackOrder
 	}
+	if c.DefaultModel != "" {
+		canonicalModel = c.DefaultModel
+	}
 	if len(c.Providers) == 0 {
 		return nil
 	}
@@ -94,8 +109,11 @@ func applyConfig(c *Config) error {
 	newHardCap := map[string]bool{}
 
 	for name, pc := range c.Providers {
-		if pc.BaseURL == "" || pc.Model == "" || pc.APIKeyEnv == "" {
-			return fmt.Errorf("provider %q needs base_url, model and api_key_env", name)
+		if pc.BaseURL == "" || pc.APIKeyEnv == "" {
+			return fmt.Errorf("provider %q needs base_url and api_key_env", name)
+		}
+		if pc.Model == "" && len(pc.Models) == 0 {
+			return fmt.Errorf("provider %q needs model or models", name)
 		}
 		if pc.Rates == nil {
 			return fmt.Errorf("provider %q needs a rates block", name)
@@ -110,7 +128,18 @@ func applyConfig(c *Config) error {
 			}
 		}
 
-		newProvs[name] = &Provider{Base: pc.BaseURL, Model: pc.Model,
+		var models map[string]ModelRoute
+		if len(pc.Models) > 0 {
+			models = make(map[string]ModelRoute, len(pc.Models))
+			for canonical, mc := range pc.Models {
+				id := mc.ID
+				if id == "" {
+					id = canonical
+				}
+				models[canonical] = ModelRoute{ID: id, Rates: mc.Rates, API: mc.API}
+			}
+		}
+		newProvs[name] = &Provider{Base: pc.BaseURL, Model: pc.Model, Models: models,
 			KeyEnv: pc.APIKeyEnv, UA: pc.UserAgent,
 			SessionHeader: pc.SessionHeader}
 		wins := make([]Window, 0, len(pc.PeakWindowsUTC))
