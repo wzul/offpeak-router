@@ -158,6 +158,7 @@ pricing page and keep it current. An empty list means "never peaks".
 | `ROUTER_ADDR` | `127.0.0.1:8788` | listen address |
 | `ROUTER_DB` | `spend.json` | allowance ledger |
 | `ROUTER_SHADOW` | `0` | `1` = decide only, never call upstream |
+| `ROUTER_AUTH_TOKEN` | - | when set, every endpoint except `/health` requires a bearer token in the Authorization header |
 | `ROUTER_<NAME>_BASE` / `_MODEL` | — | retarget one provider without a config file |
 
 ## Endpoints
@@ -188,7 +189,7 @@ the argument.
 ## Tests
 
 ```bash
-go test ./...          # 25 tests
+go test ./...          # 26 tests
 go test -race ./...    # same, under the race detector
 go test -v ./...       # per-test detail
 ```
@@ -223,9 +224,15 @@ weekend rule, or breaking the circuit breaker in either direction makes the suit
   full input rate and the estimate drifts high.
 - **Single process, single ledger file.** Written atomically (temp file + rename) but
   not designed to be shared over NFS or between concurrent instances.
-- **No auth on the listener.** It binds to loopback by default; do not expose it
-  publicly without a reverse proxy that authenticates. It holds your provider keys and
-  will spend your credit for anyone who can reach it.
+- **Auth is off unless you set `ROUTER_AUTH_TOKEN`.** It binds to loopback by default.
+  If you expose it, set the token — the router holds your provider keys and will spend
+  your credit for anyone who can reach it. `/health` is deliberately left open so a
+  supervisor can probe liveness without the credential; it only reports whether each
+  key is present, never its value.
+- **Bearer, not basic.** An OpenAI client sends `api_key` as a bearer
+  token in the Authorization header, so bearer is the one scheme that works
+  without a custom client. Basic auth would need a proxy in front to
+  translate it.
 
 ## License
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -155,6 +156,9 @@ var (
 	led    *Ledger
 	provs  map[string]*Provider
 	shadow bool
+	// authToken, when non-empty, is required as `Authorization: Bearer <token>`
+	// on every endpoint except /health. Empty disables auth entirely.
+	authToken string
 	// Overridable by the config file.
 	cfgListen = "127.0.0.1:8788"
 	cfgLedger = "spend.json"
@@ -178,6 +182,36 @@ func record(provider string, u *usageBlock, now time.Time) float64 {
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────
+
+// withAuth gates a handler behind the bearer token. /health stays open so a
+// supervisor can probe liveness without holding the credential.
+func withAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || authorized(r) {
+			h(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="offpeak-router"`)
+		writeJSON(w, 401, map[string]any{"error": map[string]string{
+			"message": "unauthorized: send Authorization: Bearer <token>",
+			"type":    "invalid_request_error",
+		}})
+	}
+}
+
+func authorized(r *http.Request) bool {
+	if authToken == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return false
+	}
+	// Constant time: a length leak here is a token oracle.
+	return subtle.ConstantTimeCompare(
+		[]byte(strings.TrimPrefix(h, prefix)), []byte(authToken)) == 1
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -377,6 +411,18 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 	return true
 }
 
+// newMux is the only place routes are registered, so tests exercise the same
+// table the binary serves. A test that builds its own mux silently skips
+// whatever middleware main() wraps around these handlers.
+func newMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", withAuth(handleHealth))
+	mux.HandleFunc("/status", withAuth(handleStatus))
+	mux.HandleFunc("/v1/models", withAuth(handleModels))
+	mux.HandleFunc("/v1/chat/completions", withAuth(handleChat))
+	return mux
+}
+
 func main() {
 	shadow = os.Getenv("ROUTER_SHADOW") == "1"
 	provs = defaultProviders()
@@ -400,16 +446,17 @@ func main() {
 	}
 	led = NewLedger(cfgLedger)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/status", handleStatus)
-	mux.HandleFunc("/v1/models", handleModels)
-	mux.HandleFunc("/v1/chat/completions", handleChat)
+	authToken = os.Getenv("ROUTER_AUTH_TOKEN")
+	if authToken != "" {
+		log.Printf("auth: bearer token required (set ROUTER_AUTH_TOKEN to change)")
+	} else {
+		log.Printf("auth: DISABLED — do not expose this listener publicly")
+	}
 
 	log.Printf("offpeak-router on %s  shadow=%v  providers=%d", cfgListen, shadow, len(provs))
 	srv := &http.Server{
 		Addr:              cfgListen,
-		Handler:           mux,
+		Handler:           newMux(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())

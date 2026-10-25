@@ -87,14 +87,10 @@ func setup(t *testing.T, up *httptest.Server) *httptest.Server {
 	led = NewLedger(filepath.Join(t.TempDir(), "spend.json"))
 	breakers = map[string]*breakerEntry{}
 	shadow = false
+	authToken = ""
 	nowFn = func() time.Time { return mon(0) }
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/status", handleStatus)
-	mux.HandleFunc("/v1/models", handleModels)
-	mux.HandleFunc("/v1/chat/completions", handleChat)
-	s := httptest.NewServer(mux)
+	s := httptest.NewServer(newMux())
 	t.Cleanup(s.Close)
 	return s
 }
@@ -323,6 +319,67 @@ func TestAllDownReturns502(t *testing.T) {
 	_ = json.Unmarshal(body, &out)
 	if len(out.Error.Attempts) != 3 {
 		t.Errorf("attempts = %d, want 3 (%s)", len(out.Error.Attempts), body)
+	}
+}
+
+// Auth must reject a missing or wrong token and let the right one through,
+// while leaving /health open for a supervisor.
+func TestAuthRequired(t *testing.T) {
+	_, ups := newUpstream(t)
+	router := setup(t, ups)
+	authToken = "s3cret-token"
+	defer func() { authToken = "" }()
+	atHour(0)
+
+	post := func(auth string) int {
+		body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+		req, err := http.NewRequest(http.MethodPost,
+			router.URL+"/v1/chat/completions", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+
+	if got := post(""); got != 401 {
+		t.Errorf("no token: status %d, want 401", got)
+	}
+	if got := post("Bearer wrong"); got != 401 {
+		t.Errorf("wrong token: status %d, want 401", got)
+	}
+	if got := post("Basic abc"); got != 401 {
+		t.Errorf("wrong scheme: status %d, want 401", got)
+	}
+	if got := post("Bearer s3cret-token"); got != 200 {
+		t.Errorf("right token: status %d, want 200", got)
+	}
+
+	// /health must stay open, /status must not.
+	resp, err := http.Get(router.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("/health status %d, want 200 without auth", resp.StatusCode)
+	}
+	resp, err = http.Get(router.URL + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("/status status %d, want 401 without auth", resp.StatusCode)
 	}
 }
 
