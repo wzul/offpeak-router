@@ -1,0 +1,30 @@
+{
+  "listen": "127.0.0.1:8788",
+  "ledger": "spend.json",
+  "fallback_order": ["cheap", "backup", "metered"],
+  "providers": {
+    "cheap": {
+      "base_url": "https://opencode.ai/inference/go/openai/v1",
+      "model": "deepseek-v4.1-flash",
+      "api_key_env": "OPENCODE_API_KEY",
+      "monthly_allowance_usd": 80,
+      "hard_cap": true,
+      "rates": { "in": 0.15, "cache": 0.003, "out": 0.60, "peak_mult": 2.0 },
+      "peak_windows_utc": [[1, 4], [6, 10]]
+    },
+    "backup": {
+      "base_url": "https://ollama.com/v1",
+      "model": "deepseek-v4.1-flash:1017",
+      "api_key_env": "OLLAMA_API_KEY",
+      "monthly_allowance_usd": 60,
+      "rates": { "in": 0.15, "cache": 0.003, "out": 0.60, "peak_mult": 2.0 },
+      "peak_windows_utc": [[12, 18]]
+    },
+    "metered": {
+      "base_url": "https://inference-api.nousresearch.com/v1",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "api_key_env": "NOUS_API_KEY",
+      "rates": { "in": 0.02, "cache": 0.015, "out": 1.00, "peak_mult": 1.0 }
+    }
+  }
+}

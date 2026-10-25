@@ -1,0 +1,29 @@
+[Unit]
+Description=offpeak-router — peak-aware OpenAI-compatible LLM router
+Documentation=https://github.com/wzul/offpeak-router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/offpeak-router
+ExecStart=/opt/offpeak-router/run.sh
+Restart=always
+RestartSec=5
+
+# Nothing to install, so give it a real ceiling rather than a suggestion.
+MemoryMax=64M
+Environment=GOGC=50
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/offpeak-router
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

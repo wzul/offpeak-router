@@ -1,0 +1,12 @@
+# binary
+/offpeak-router
+
+# runtime ledger
+/spend.json
+/spend.json.tmp
+
+# local config may hold nothing secret (keys come from env), but keep it out anyway
+/config.json
+
+*.tmp
+.DS_Store
