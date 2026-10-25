@@ -145,6 +145,36 @@ curl -s http://127.0.0.1:8788/status | jq
 Run it for a day before you move real traffic — it costs nothing and shows exactly
 which provider each hour would have used.
 
+### Web search and fetch
+
+The same binary also fronts the web layer, behind the same bearer token:
+
+```bash
+curl -s -X POST http://127.0.0.1:8788/v1/search \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"golang net/http timeout","limit":5}'
+# {"success":true,"query":"...","data":{"web":[{"title","url","description","position"}]}}
+
+curl -s -X POST http://127.0.0.1:8788/v1/fetch \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://go.dev/doc/"}'
+# {"success":true,"data":[{"url","title","content","status"}]}
+```
+
+- **`/v1/search`** takes `{"query","limit"}` (max 20) or `GET /v1/search?q=`. Backend is
+  Brave when `BRAVE_SEARCH_API_KEY` is set, otherwise DuckDuckGo's HTML endpoint, which
+  needs no key. The response carries `X-Router-Backend`; `/status` reports the active one.
+- **`/v1/fetch`** takes `{"url"}` or `{"urls":[…]}` (max 5) or `GET /v1/fetch?url=`. It
+  follows up to five redirects, caps the body at 4 MiB, and reduces HTML to a title plus
+  readable text (scripts, styles, `<head>` and inline SVG dropped; block tags become line
+  breaks). Non-HTML bodies are returned verbatim.
+- **Both refuse non-public targets.** Any host that resolves to loopback, RFC1918,
+  link-local (including `169.254.169.254`), carrier-grade NAT or multicast is rejected
+  *before* a connection is made, and the same check runs on every redirect hop — an
+  authenticated route on a host with internal services is otherwise an SSRF pivot.
+- Neither route costs anything: they are not model calls and do not touch the spend ledger.
+  `/status` counts them under `web.search_calls` / `web.fetch_calls`.
+
 ## Configuration
 
 Works out of the box with three providers of DeepSeek V4.1 Flash. For anything
@@ -214,6 +244,9 @@ pricing page and keep it current. An empty list means "never peaks".
 | path | purpose |
 |---|---|
 | `POST /v1/chat/completions` | proxy — streaming and non-streaming |
+| `POST /v1/systemone` | proxy for decision models (one state + typed schema in) |
+| `POST /v1/search` · `GET /v1/search?q=` | web search — Brave or DuckDuckGo, no key required |
+| `POST /v1/fetch` · `GET /v1/fetch?url=` | fetch a page and return title + readable text; non-public targets refused |
 | `GET /v1/models` | the configured provider model ids |
 | `GET /status` | per provider: peak flag, allowance, spend, remaining, `hard_cap`, whether the key is present — plus the live order and breaker state |
 | `GET /health` | liveness, plus which keys are present (never their values) |
