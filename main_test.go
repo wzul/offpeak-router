@@ -17,9 +17,10 @@ const usageJSON = `{"prompt_tokens":1000,"completion_tokens":100,` +
 	`"prompt_tokens_details":{"cached_tokens":800}}`
 
 type upstream struct {
-	mu   sync.Mutex
-	hits []string        // provider path segment, in order
-	fail map[string]bool // path segment -> always 500
+	mu     sync.Mutex
+	hits   []string        // provider path segment, in order
+	fail   map[string]bool // path segment -> always 500
+	lastUA string
 }
 
 func (u *upstream) record(p string) bool {
@@ -56,6 +57,9 @@ func newUpstream(t *testing.T) (*upstream, *httptest.Server) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		u.mu.Lock()
+		u.lastUA = r.Header.Get("User-Agent")
+		u.mu.Unlock()
 		// echo back which model the router asked for, so tests can assert rewrite
 		if stream, _ := body["stream"].(bool); stream {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -319,6 +323,30 @@ func TestAllDownReturns502(t *testing.T) {
 	_ = json.Unmarshal(body, &out)
 	if len(out.Error.Attempts) != 3 {
 		t.Errorf("attempts = %d, want 3 (%s)", len(out.Error.Attempts), body)
+	}
+}
+
+// A request with no User-Agent is refused by Cloudflare in front of at least
+// one provider, so the router must always identify itself. This is the
+// regression test for a real 403 seen in production.
+func TestUserAgentSent(t *testing.T) {
+	up, ups := newUpstream(t)
+	router := setup(t, ups)
+	atHour(0)
+
+	ask(t, router, false)
+	up.mu.Lock()
+	got := up.lastUA
+	up.mu.Unlock()
+
+	if got == "" {
+		t.Fatal("no User-Agent sent — upstreams behind Cloudflare answer 403")
+	}
+	if !strings.HasPrefix(got, "offpeak-router/") {
+		t.Errorf("User-Agent = %q, want the offpeak-router prefix", got)
+	}
+	if strings.Contains(got, "Go-http-client") {
+		t.Error("Go's default User-Agent is the one Cloudflare blocks")
 	}
 }
 

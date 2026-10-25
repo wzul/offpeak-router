@@ -48,6 +48,7 @@ type ProviderConfig struct {
 	BaseURL      string   `json:"base_url"`
 	Model        string   `json:"model"`
 	APIKeyEnv    string   `json:"api_key_env"`
+	UserAgent    string   `json:"user_agent"`
 	MonthlyAllow *float64 `json:"monthly_allowance_usd"`
 	// HardCap means the allowance cannot be exceeded: once spent, the provider
 	// is dropped. Omit it for a subscription you can top up past the allowance.
@@ -108,7 +109,8 @@ func applyConfig(c *Config) error {
 			}
 		}
 
-		newProvs[name] = &Provider{Base: pc.BaseURL, Model: pc.Model, KeyEnv: pc.APIKeyEnv}
+		newProvs[name] = &Provider{Base: pc.BaseURL, Model: pc.Model,
+			KeyEnv: pc.APIKeyEnv, UA: pc.UserAgent}
 		wins := make([]Window, 0, len(pc.PeakWindowsUTC))
 		for _, w := range pc.PeakWindowsUTC {
 			wins = append(wins, Window{w[0], w[1]})

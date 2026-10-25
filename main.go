@@ -15,10 +15,22 @@ import (
 	"time"
 )
 
+// Version is reported in the User-Agent and should match the release tag.
+const Version = "1.0.0"
+
+// DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
+// least one provider and returns 403 to Go's default "Go-http-client/1.1" and
+// to an empty UA, while accepting any identifiable UA. Without this the router
+// looks like a bot wall to the upstream.
+const DefaultUserAgent = "offpeak-router/" + Version
+
 type Provider struct {
 	Base   string
 	Model  string
 	KeyEnv string
+	// UA overrides DefaultUserAgent for providers that demand something
+	// specific. Empty means DefaultUserAgent.
+	UA string
 }
 
 // defaultProviders is the built-in table, used when no config file is given.
@@ -54,6 +66,9 @@ func applyEnvOverrides() {
 		}
 		if v := os.Getenv("ROUTER_" + up + "_MODEL"); v != "" {
 			p.Model = v
+		}
+		if v := os.Getenv("ROUTER_" + up + "_UA"); v != "" {
+			p.UA = v
 		}
 	}
 }
@@ -314,22 +329,27 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		if anyFailover {
 			w.Header().Set("X-Router-Failover", "true")
 		}
-		if forward(w, r, name, p, key, body, stream, now) {
+		if err := forward(w, r, name, p, key, body, stream, now); err == nil {
 			breakerOK(name)
 			return
+		} else {
+			log.Printf("provider %s failed: %v", name, err)
+			breakerFail(name)
+			anyFailover = true
+			attempts = append(attempts, map[string]string{
+				"provider": name, "error": err.Error()})
 		}
-		breakerFail(name)
-		anyFailover = true
-		attempts = append(attempts, map[string]string{"provider": name, "error": "upstream failed"})
 	}
 	writeJSON(w, 502, map[string]any{
 		"error": map[string]any{"message": "all providers failed", "attempts": attempts},
 	})
 }
 
-// forward returns true once it has written a complete response to w.
+// forward writes a complete response to w and returns nil, or returns the
+// error without touching w. Callers need the real cause: a bare "upstream
+// failed" made a working provider look broken.
 func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
-	key string, body map[string]any, stream bool, now time.Time) bool {
+	key string, body map[string]any, stream bool, now time.Time) error {
 
 	payload := make(map[string]any, len(body)+2)
 	for k, v := range body {
@@ -347,24 +367,30 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 
 	buf, err := json.Marshal(payload)
 	if err != nil {
-		return false
+		return fmt.Errorf("encode body: %w", err)
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		p.Base+"/chat/completions", bytes.NewReader(buf))
 	if err != nil {
-		return false
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
+	ua := p.UA
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	req.Header.Set("User-Agent", ua)
 
 	resp, err := httpc.Do(req)
 	if err != nil {
-		return false
+		return fmt.Errorf("transport: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return false
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode,
+			strings.TrimSpace(string(detail)))
 	}
 
 	w.Header().Set("X-Router-Provider", name)
@@ -372,7 +398,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 	if !stream {
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return false
+			return fmt.Errorf("read body: %w", err)
 		}
 		var env usageEnvelope
 		_ = json.Unmarshal(raw, &env)
@@ -381,7 +407,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 		w.Header().Set("X-Router-Usd", fmt.Sprintf("%.6f", cost))
 		w.WriteHeader(200)
 		_, _ = w.Write(raw)
-		return true
+		return nil
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -408,7 +434,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 		}
 	}
 	record(name, captured, now)
-	return true
+	return nil
 }
 
 // newMux is the only place routes are registered, so tests exercise the same
