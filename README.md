@@ -40,6 +40,9 @@ For every request, providers are ranked and the first usable one wins:
 | 3 | any allowance left, even at peak | a prepaid token is never worse than a metered one |
 | 4 | metered: cheapest current marginal cost | e.g. a provider's own top-up vs. a third provider |
 
+A provider priced at zero would sort to the front of the metered tier — free
+beats billed. That is the natural place for a free variant if you add one.
+
 On a transport error or HTTP 5xx it falls through to the next candidate, so a dead
 provider costs latency rather than a failed request. A provider with no API key is
 skipped without an attempt. After 3 consecutive failures a provider is skipped for
@@ -106,8 +109,8 @@ which provider each hour would have used.
 
 ## Configuration
 
-Works out of the box with three providers of DeepSeek V4.1 Flash. For anything else,
-pass a JSON file:
+Works out of the box with three providers of DeepSeek V4.1 Flash. For anything
+else, pass a JSON file:
 
 ```bash
 ROUTER_CONFIG=./config.json ./offpeak-router

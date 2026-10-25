@@ -60,7 +60,7 @@ func defaultProviders() map[string]*Provider {
 // which is what the test suite uses.
 func applyEnvOverrides() {
 	for name, p := range provs {
-		up := strings.ToUpper(name)
+		up := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 		if v := os.Getenv("ROUTER_" + up + "_BASE"); v != "" {
 			p.Base = v
 		}

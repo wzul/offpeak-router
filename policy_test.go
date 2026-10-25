@@ -208,8 +208,16 @@ func TestTopupProviderSurvives(t *testing.T) {
 // candidateOrder must not know any provider by name: a config file can load an
 // arbitrary set and the tiers still have to work.
 func TestArbitraryProviderSet(t *testing.T) {
-	saved := provs
-	defer func() { provs = saved }()
+	savedProvs, savedWindows := provs, peakWindows
+	savedAllowance, savedRates, savedCap := allowance, rates, hardCap
+	defer func() {
+		provs, peakWindows = savedProvs, savedWindows
+		allowance, rates, hardCap = savedAllowance, savedRates, savedCap
+	}()
+	peakWindows = map[string][]Window{}
+	allowance = map[string]float64{}
+	rates = map[string]Rates{}
+	hardCap = map[string]bool{}
 
 	provs = map[string]*Provider{
 		"alpha": {Base: "b", Model: "m", KeyEnv: "K1"},

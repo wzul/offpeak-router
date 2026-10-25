@@ -83,6 +83,12 @@ func setup(t *testing.T, up *httptest.Server) *httptest.Server {
 	t.Setenv("OLLAMA_API_KEY", "k-ollama")
 	t.Setenv("NOUS_API_KEY", "k-nous")
 
+	// Leaving provs replaced would leak into later tests in the same package —
+	// the policy tests then run against a three-provider world and never see
+	// a provider this test never stubbed.
+	origProvs := provs
+	t.Cleanup(func() { provs = origProvs })
+
 	provs = map[string]*Provider{
 		"go":     {Base: up.URL + "/go/v1", Model: "mock-go", KeyEnv: "OPENCODE_API_KEY"},
 		"ollama": {Base: up.URL + "/ollama/v1", Model: "mock-ollama", KeyEnv: "OLLAMA_API_KEY"},
