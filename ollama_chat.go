@@ -186,6 +186,9 @@ func handleOllamaShow(w http.ResponseWriter, r *http.Request) {
 		"modelfile":  "# routed by offpeak-router; there is no local model file",
 		"parameters": "",
 		"template":   "",
+		// Ollama reports capabilities here, and a client checks this before
+		// sending an image rather than discovering the gap from a failed request.
+		"capabilities": capabilitiesFor(model),
 		"details": map[string]any{
 			"parent_model": "", "format": "api", "family": modelAPI(model),
 			"families": by, "parameter_size": "", "quantization_level": "",

@@ -175,6 +175,31 @@ curl -s -X POST http://127.0.0.1:8788/v1/fetch \
 - Neither route costs anything: they are not model calls and do not touch the spend ledger.
   `/status` counts them under `web.search_calls` / `web.fetch_calls`.
 
+### Capabilities: does this route take images?
+
+Discovery used to answer only "which models exist". A vision model and a text-only model
+looked identical, so an agent looking for image support found no evidence of one and
+reported that the router has no vision model — while the model behind it answered "Red"
+for a red PNG on two upstreams. Every discovery route now states the capability, and only
+capabilities that a live request proved:
+
+```bash
+curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/v1/models
+# {"data":[{"id":"deepseek-v4.1-flash","api":"chat","providers":["go","nous","ollama"],
+#           "capabilities":["completion","vision","thinking"],
+#           "capability_providers":{"vision":["go","ollama"],"thinking":["go","ollama"]},
+#           "input_modalities":["text","image"]}]}
+```
+
+- **`capability_providers` is the honest part.** Vision was proved on `go` and `ollama`
+  with a real PNG; `nous` is absent because it was never verified, not because it failed.
+  A client that must not risk a 400 can read which upstream carries the capability.
+- **`capabilities` uses Ollama's vocabulary** (`completion`, `vision`, `thinking`, `tools`),
+  the same strings `/api/show` returns, so one parser works for both dialects.
+  `input_modalities` is there for clients that follow the OpenAI shape instead.
+- **Never listed without proof.** `clef` reports `["completion"]` only: it is a decision
+  model, and advertising a capability nobody tested is how a client ships a broken path.
+
 ### Model discovery, in both dialects
 
 `/v1/models` is the OpenAI answer. Some clients do not ask it first: they probe for

@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.5.1"
+const Version = "1.6.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -468,6 +468,11 @@ func handleModels(w http.ResponseWriter, _ *http.Request) {
 		data = append(data, map[string]any{
 			"id": m, "object": "model", "owned_by": "offpeak-router",
 			"providers": by, "api": modelAPI(m),
+			// Without these a client has no way to know the model takes images
+			// and concludes the router has no vision model at all.
+			"capabilities":         capabilitiesFor(m),
+			"capability_providers": capabilityProvidersFor(m),
+			"input_modalities":     inputModalities(m),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})

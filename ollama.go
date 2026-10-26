@@ -65,6 +65,8 @@ func handleOllamaTags(w http.ResponseWriter, _ *http.Request) {
 				"quantization_level": "",
 				"router_api":         modelAPI(id),
 				"router_providers":   by,
+				"capabilities":       capabilitiesFor(id),
+				"input_modalities":   inputModalities(id),
 			},
 		})
 	}
