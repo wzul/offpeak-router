@@ -136,3 +136,38 @@ func containsAny(hay []any, needle string) bool {
 	}
 	return false
 }
+
+// gemma4 exists on ollama only: go answers "Model is unavailable". Both the
+// canonical name and ollama's own id must resolve, or a client carrying the
+// upstream id gets a 400 for a model the router does serve.
+func TestGemma4RoutingAndCapabilities(t *testing.T) {
+	prev := provs
+	t.Cleanup(func() { provs = prev })
+	provs = defaultProviders()
+
+	for _, ask := range []string{"gemma4", "gemma4:31b"} {
+		got, ok := resolveModel(ask)
+		if !ok || got != "gemma4" {
+			t.Errorf("resolveModel(%q) = %q, %v; want gemma4", ask, got, ok)
+		}
+	}
+	// Exactly one provider serves it, and it is not the hard-capped one.
+	var by []string
+	for name := range provs {
+		if servesModel(name, "gemma4") {
+			by = append(by, name)
+		}
+	}
+	if len(by) != 1 || by[0] != "ollama" {
+		t.Fatalf("gemma4 providers = %v, want [ollama]", by)
+	}
+	if !hasVision("gemma4") {
+		t.Error("gemma4 was verified vision-capable on ollama")
+	}
+	if providers := capabilityProvidersFor("gemma4")["vision"]; len(providers) != 1 || providers[0] != "ollama" {
+		t.Errorf("vision providers = %v, want [ollama] only", providers)
+	}
+	if api := modelAPI("gemma4"); api != APIChat {
+		t.Errorf("api = %q, want chat", api)
+	}
+}

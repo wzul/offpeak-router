@@ -14,6 +14,9 @@ package main
 // modelCapabilities holds the verified capability set per canonical model id.
 var modelCapabilities = map[string][]string{
 	"deepseek-v4.1-flash": {"completion", "vision", "thinking"},
+	// gemma4:31b answered "Red" for a red PNG on ollama; go does not serve it at
+	// all, and no other upstream was verified.
+	"gemma4": {"completion", "vision"},
 	// Clef answers one decision schema; it is not a chat or a vision model.
 	"clef": {"completion"},
 }
@@ -24,6 +27,9 @@ var capabilityProviders = map[string]map[string][]string{
 	"deepseek-v4.1-flash": {
 		"vision":   {"go", "ollama"},
 		"thinking": {"go", "ollama"},
+	},
+	"gemma4": {
+		"vision": {"ollama"},
 	},
 }
 

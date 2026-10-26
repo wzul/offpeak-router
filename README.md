@@ -199,6 +199,9 @@ curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/v1/m
   `input_modalities` is there for clients that follow the OpenAI shape instead.
 - **Never listed without proof.** `clef` reports `["completion"]` only: it is a decision
   model, and advertising a capability nobody tested is how a client ships a broken path.
+- **A model can exist on one provider only.** `gemma4` maps to ollama's `gemma4:31b`;
+  opencode's `go` answers `Model is unavailable` for it, so `capability_providers.vision`
+  names `ollama` alone. Both the canonical name and the upstream id resolve.
 
 ### Model discovery, in both dialects
 

@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.6.0"
+const Version = "1.7.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -120,7 +120,10 @@ func defaultProviders() map[string]*Provider {
 			Base: "https://ollama.com/v1",
 			Models: map[string]ModelRoute{
 				"deepseek-v4.1-flash": {ID: "deepseek-v4.1-flash:1017"},
-				"clef":                {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
+				// opencode's go provider answers "Model is unavailable" for gemma4,
+				// so only ollama carries it. Same canonical name, provider-specific id.
+				"gemma4": {ID: "gemma4:31b"},
+				"clef":   {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
 			},
 			KeyEnv: "OLLAMA_API_KEY",
 		},
