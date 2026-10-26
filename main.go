@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.10.0"
+const Version = "1.11.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -368,10 +368,13 @@ var (
 	// Initialised at package level, not in main(): state that only exists
 	// once main() runs is state the tests cannot reach.
 	httpc = &http.Client{
-		Transport: &http.Transport{
+		// The wrapper sends the client's full Accept-Encoding and decodes whatever
+		// comes back: Go's transport would otherwise only handle gzip, and only
+		// when it set the header itself.
+		Transport: &decompressTransport{base: &http.Transport{
 			ResponseHeaderTimeout: 120 * time.Second,
 			MaxIdleConnsPerHost:   8,
-		},
+		}},
 	}
 )
 

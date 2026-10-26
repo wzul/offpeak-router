@@ -356,7 +356,15 @@ x-opencode-session / x-opencode-session-id / x-session-affinity / x-session-id: 
 x-opencode-project: <32 hex>
 traceparent: 00-<32 hex>-<16 hex>-01
 b3: <32 hex>-<16 hex>-1-<16 hex>
+Accept-Encoding: gzip, deflate, br, zstd
 ```
+
+That last header is only honest because the router can read the answers: a transport
+wrapper sets the full set and decodes `gzip`, `deflate` (zlib-wrapped or raw), `br` and
+`zstd` before any handler sees the body. Go's own transport decompresses gzip alone, and
+only when it set the header itself — advertising brotli without a decoder would turn
+every provider answer into a parse error that looked like an outage. Streaming stays
+streaming: the decoders are readers, not whole-body buffers.
 
 The session id is derived from the conversation, so prompt caching still works: the
 same conversation keeps its id across turns, and a client that sends its own
