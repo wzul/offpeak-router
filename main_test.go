@@ -363,8 +363,11 @@ func TestUserAgentSent(t *testing.T) {
 	if got == "" {
 		t.Fatal("no User-Agent sent — upstreams behind Cloudflare answer 403")
 	}
-	if !strings.HasPrefix(got, "offpeak-router/") {
-		t.Errorf("User-Agent = %q, want the offpeak-router prefix", got)
+	// Naming this router in the User-Agent tells a third-party provider exactly
+	// which gateway is calling. The identity sent is the client the provider
+	// already expects, so the request is indistinguishable from that client.
+	if got != OpenCodeUserAgent {
+		t.Errorf("User-Agent = %q, want %q", got, OpenCodeUserAgent)
 	}
 	if strings.Contains(got, "Go-http-client") {
 		t.Error("Go's default User-Agent is the one Cloudflare blocks")

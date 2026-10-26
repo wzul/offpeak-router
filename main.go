@@ -19,13 +19,12 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.9.0"
+const Version = "1.10.0"
 
-// DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
-// least one provider and returns 403 to Go's default "Go-http-client/1.1" and
-// to an empty UA, while accepting any identifiable UA. Without this the router
-// looks like a bot wall to the upstream.
-const DefaultUserAgent = "offpeak-router/" + Version
+// DefaultUserAgent lives in headers.go: it carries the client identity the
+// upstream expects, because naming this router in the User-Agent is a signpost
+// for a third-party provider. An identifiable UA is still required — Cloudflare
+// rejects Go's default and an empty one.
 
 // ModelRoute is one model a provider can serve: the id the provider expects,
 // plus an optional rate override for providers whose models are priced apart.
@@ -92,8 +91,9 @@ func conversationID(r *http.Request, body map[string]any) string {
 		}
 	}
 done:
-	sum := hex.EncodeToString(h.Sum(nil))
-	return "offpeak-" + sum[:32]
+	// An id with this router's own prefix in it defeats the point of sending a
+	// session header at all: the shape must match what the client itself emits.
+	return opencodeSessionID(hex.EncodeToString(h.Sum(nil)))
 }
 
 // canonicalModel is the model a request gets when it asks for nothing. Clients
@@ -702,14 +702,7 @@ func forwardSystemOne(w http.ResponseWriter, r *http.Request, name string,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
-	ua := p.UA
-	if ua == "" {
-		ua = DefaultUserAgent
-	}
-	req.Header.Set("User-Agent", ua)
-	if p.SessionHeader {
-		req.Header.Set("x-opencode-session", conversationID(r, body))
-	}
+	applyUpstreamHeaders(req, p, r, body)
 
 	resp, err := httpc.Do(req)
 	if err != nil {
@@ -772,14 +765,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
-	ua := p.UA
-	if ua == "" {
-		ua = DefaultUserAgent
-	}
-	req.Header.Set("User-Agent", ua)
-	if p.SessionHeader {
-		req.Header.Set("x-opencode-session", conversationID(r, body))
-	}
+	applyUpstreamHeaders(req, p, r, body)
 
 	resp, err := httpc.Do(req)
 	if err != nil {

@@ -340,6 +340,28 @@ ROUTER_CONFIG=./config.json ./offpeak-router
 | `peak_mult` | multiplier applied during peak. Use `1.0` for a provider that never doubles |
 | `peak_windows_utc` | half-open `[start, end)` UTC hours, **Monday–Friday only**; weekends are fully off-peak |
 | `session_header` | `true` = send `x-opencode-session`, a stable per-conversation id. OpenCode Go **rejects** a request without it |
+
+### What the upstream sees
+
+Requests carry the identity of the client the provider expects, not this router's.
+A User-Agent reading `offpeak-router/1.10.0` beside a session id prefixed `offpeak-`
+told the provider which third-party proxy was calling — exactly the thing the
+`x-opencode-session` header exists to satisfy. Measured from the installed opencode
+CLI (v2.1.2) pointed at a throwaway endpoint, that client sends:
+
+```
+User-Agent: opencode/latest/2.1.2/cli
+x-opencode-client: cli
+x-opencode-session / x-opencode-session-id / x-session-affinity / x-session-id: ses_<24>
+x-opencode-project: <32 hex>
+traceparent: 00-<32 hex>-<16 hex>-01
+b3: <32 hex>-<16 hex>-1-<16 hex>
+```
+
+The session id is derived from the conversation, so prompt caching still works: the
+same conversation keeps its id across turns, and a client that sends its own
+`x-opencode-session` keeps it. Set `ROUTER_UA` (or `user_agent` per provider) when a
+client release changes the string; no rebuild of the identity logic is needed.
 | `user_agent` | override the User-Agent for providers that demand a specific one |
 
 The session id is taken from the client's own `x-opencode-session` when present, so
@@ -360,6 +382,7 @@ pricing page and keep it current. An empty list means "never peaks".
 | `ROUTER_SHADOW` | `0` | `1` = decide only, never call upstream |
 | `ROUTER_AUTH_TOKEN` | - | when set, every endpoint except `/health` requires a bearer token in the Authorization header |
 | `ROUTER_<NAME>_BASE` / `_MODEL` | — | retarget one provider without a config file |
+| `ROUTER_UA` | the client identity below | override the User-Agent sent upstream, e.g. after a client version bump |
 
 ## Endpoints
 

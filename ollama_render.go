@@ -94,14 +94,7 @@ func renderOllama(w http.ResponseWriter, r *http.Request, name string, p *Provid
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
-	ua := p.UA
-	if ua == "" {
-		ua = DefaultUserAgent
-	}
-	req.Header.Set("User-Agent", ua)
-	if p.SessionHeader {
-		req.Header.Set("x-opencode-session", conversationID(r, body))
-	}
+	applyUpstreamHeaders(req, p, r, body)
 
 	resp, err := httpc.Do(req)
 	if err != nil {
