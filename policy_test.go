@@ -153,10 +153,31 @@ func TestCandidateOrder(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := candidateOrder(c.at, c.spent, "")
-		if got[0] != c.want {
-			t.Errorf("%s: first = %q, want %q (order %v)", c.name, got[0], c.want, got)
+		// A provider marked First is deliberately ahead of the peak policy, so the
+		// policy itself is asserted from the first unpinned slot. Skipping the pin
+		// instead of deleting it keeps this test about peak windows, and the pin is
+		// covered by TestFirstProviderRunsAheadOfPeakPolicy.
+		rest := withoutFirst(got)
+		if len(rest) == 0 {
+			t.Fatalf("%s: no provider after the pinned ones (order %v)", c.name, got)
+		}
+		if rest[0] != c.want {
+			t.Errorf("%s: first = %q, want %q (order %v)", c.name, rest[0], c.want, got)
 		}
 	}
+}
+
+// withoutFirst drops providers pinned with Provider.First, which are tried ahead of
+// the peak and price policy by design.
+func withoutFirst(order []string) []string {
+	out := make([]string, 0, len(order))
+	for _, name := range order {
+		if p, ok := provs[name]; ok && p.First {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 func TestOrderAlwaysComplete(t *testing.T) {

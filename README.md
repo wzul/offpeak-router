@@ -359,6 +359,29 @@ b3: <32 hex>-<16 hex>-1-<16 hex>
 Accept-Encoding: gzip, deflate, br, zstd
 ```
 
+### The spare account
+
+`ollama-lenjan` is a second ollama.com account with `First: true`. It is tried before every
+peak and price rule, at any hour, and only a failure moves the request on to the normal chain
+(off-peak allowance, then peak, then metered, then the configured failover). The pin is not a
+bypass of correctness: the provider must still serve the requested model, and it still falls
+under the circuit breaker - three failures open it and the chain takes over until it closes,
+which is what makes "use this until it breaks" work instead of "fail every request once".
+
+Its key lives in `OLLAMA_LENJAN_API_KEY`. To add it without pasting a secret into a chat or a
+shell history:
+
+```bash
+# on the router host
+python3 /root/mint-enrol.py        # writes /opt/offpeak-router/enrol.token, prints a URL
+```
+
+Open the URL, paste the key, submit. The endpoint writes one known key name into
+`/opt/offpeak-router/.env` (mode 600, other lines preserved), deletes the token so the link
+cannot be used twice, and exits - `Restart=always` brings the service back with the new
+environment. The response never echoes the key, and with no token file `/enrol/` is a plain
+404, indistinguishable from a route that does not exist.
+
 ### Claude Code
 
 Point a session here and every Claude model id lands on the one model this router serves:

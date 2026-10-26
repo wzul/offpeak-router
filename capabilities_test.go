@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -151,15 +152,17 @@ func TestGemma4RoutingAndCapabilities(t *testing.T) {
 			t.Errorf("resolveModel(%q) = %q, %v; want gemma4", ask, got, ok)
 		}
 	}
-	// Exactly one provider serves it, and it is not the hard-capped one.
+	// Two ollama accounts serve it now (the spare is pinned first), and go must not:
+	// a map range would make this assertion flaky.
 	var by []string
 	for name := range provs {
 		if servesModel(name, "gemma4") {
 			by = append(by, name)
 		}
 	}
-	if len(by) != 1 || by[0] != "ollama" {
-		t.Fatalf("gemma4 providers = %v, want [ollama]", by)
+	sort.Strings(by)
+	if len(by) != 2 || by[0] != "ollama" || by[1] != "ollama-lenjan" {
+		t.Fatalf("gemma4 providers = %v, want [ollama ollama-lenjan]", by)
 	}
 	if !hasVision("gemma4") {
 		t.Error("gemma4 was verified vision-capable on ollama")

@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.12.1"
+const Version = "1.13.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -63,6 +63,10 @@ type Provider struct {
 	// OpenCode Go rejects a request without one ("MissingSessionID") and uses
 	// it to optimise routing and prompt caching.
 	SessionHeader bool
+	// First pins this provider ahead of every peak and price rule: it is tried
+	// before anything else and only a failure moves the request on. Used for a
+	// spare account whose whole purpose is to absorb traffic until it breaks.
+	First bool
 }
 
 // conversationID derives a stable identifier for the conversation a request
@@ -129,6 +133,20 @@ func defaultProviders() map[string]*Provider {
 				"clef":   {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
 			},
 			KeyEnv: "OLLAMA_API_KEY",
+		},
+		// A second ollama.com account, spent first on purpose: the owner treats it as
+		// expendable, so it runs ahead of the peak and price order until it errors and
+		// the normal chain takes over. Same upstream and same model ids as "ollama";
+		// only the credential differs, which is why it is a separate provider rather
+		// than a key rotation inside one.
+		"ollama-lenjan": {
+			Base: "https://ollama.com/v1",
+			Models: map[string]ModelRoute{
+				"deepseek-v4.1-flash": {ID: "deepseek-v4.1-flash:1017"},
+				"gemma4":              {ID: "gemma4:31b"},
+			},
+			KeyEnv: "OLLAMA_LENJAN_API_KEY",
+			First:  true,
 		},
 		"nous": {
 			Base: "https://inference-api.nousresearch.com/v1",
@@ -882,6 +900,9 @@ func newMux() *http.ServeMux {
 	mux.HandleFunc("/api/generate", withAuth(handleOllamaGenerate))
 	mux.HandleFunc("/api/show", withAuth(handleOllamaShow))
 	mux.HandleFunc("/api/ps", withAuth(handleOllamaPs))
+	// Key enrolment: one paste, one key, one use. Outside withAuth because it carries its
+	// own single-use token and is useless without it.
+	mux.HandleFunc("/enrol/", handleEnrol)
 	return mux
 }
 

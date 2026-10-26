@@ -201,10 +201,30 @@ func candidateOrder(now time.Time, spent map[string]float64, model string) []str
 		}
 	}
 
+	// A provider marked First is tried before all of it: ahead of the peak group it
+	// would otherwise land in, ahead of the price sort, and ahead of the failover
+	// chain. It is still subject to `usable` (it must serve this model) and to the
+	// circuit breaker, which is what makes "until it errors" work: one failure moves
+	// the request on, repeated failures open the breaker and skip it entirely.
+	first := make([]cand, 0, 1)
+	for name := range provs {
+		if !provs[name].First || !usable[name] {
+			continue
+		}
+		first = append(first, cand{name, 0})
+	}
+	sort.SliceStable(first, func(i, j int) bool { return first[i].name < first[j].name })
+
 	// Append the failover chain, ignoring names that are not loaded, and
 	// de-duplicate so every provider appears exactly once.
 	seen := make(map[string]bool, len(provs))
 	out := make([]string, 0, len(provs))
+	pinned := make([]string, 0, len(first))
+	for _, c := range first {
+		seen[c.name] = true
+		pinned = append(pinned, c.name)
+	}
+	out = append(out, pinned...)
 	for _, p := range append(order, failoverChain...) {
 		if !usable[p] || seen[p] {
 			continue
