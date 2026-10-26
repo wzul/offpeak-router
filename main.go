@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.7.0"
+const Version = "1.8.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -57,6 +57,9 @@ type Provider struct {
 	// UA overrides DefaultUserAgent for providers that demand something
 	// specific. Empty means DefaultUserAgent.
 	UA string
+	// OAuth marks a provider whose credential is a short-lived access token minted
+	// from a refresh token, not a static key. KeyEnv is then unused.
+	OAuth *OAuthConfig
 	// SessionHeader sends x-opencode-session, a stable per-conversation id.
 	// OpenCode Go rejects a request without one ("MissingSessionID") and uses
 	// it to optimise routing and prompt caching.
@@ -132,7 +135,14 @@ func defaultProviders() map[string]*Provider {
 			Models: map[string]ModelRoute{
 				"deepseek-v4.1-flash": {ID: "deepseek/deepseek-v4.1-flash-1017"},
 			},
-			KeyEnv: "NOUS_API_KEY",
+			// Nous issues a one-hour access token, not an API key: a copy in the
+			// environment is dead within the hour, which is why this fallback sat
+			// at 401 while the account still had credit. Mint from the refresh token.
+			OAuth: &OAuthConfig{
+				PortalBase: "https://portal.nousresearch.com",
+				ClientID:   "hermes-cli",
+				RefreshEnv: "NOUS_REFRESH_TOKEN",
+			},
 		},
 	}
 }
@@ -413,7 +423,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	keys := map[string]bool{}
 	for name, p := range provs {
-		keys[name] = os.Getenv(p.KeyEnv) != ""
+		keys[name] = providerKeyPresent(name, p)
 	}
 	writeJSON(w, 200, map[string]any{"status": "ok", "shadow": shadow, "keys": keys})
 }
@@ -438,7 +448,7 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"spent_usd":     spent[name],
 			"remaining_usd": rem,
 			"hard_cap":      hardCap[name],
-			"key_present":   os.Getenv(provs[name].KeyEnv) != "",
+			"key_present":   providerKeyPresent(name, provs[name]),
 		}
 	}
 	writeJSON(w, 200, map[string]any{
@@ -549,9 +559,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	anyFailover := false
 	for _, name := range order {
 		p := provs[name]
-		key := os.Getenv(p.KeyEnv)
-		if key == "" {
-			attempts = append(attempts, map[string]string{"provider": name, "error": "no api key"})
+		key, keyErr := providerKey(r.Context(), name, p)
+		if keyErr != nil {
+			attempts = append(attempts, map[string]string{"provider": name, "error": keyErr.Error()})
 			continue
 		}
 		if breakerOpen(name) {
@@ -641,9 +651,9 @@ func handleSystemOne(w http.ResponseWriter, r *http.Request) {
 	anyFailover := false
 	for _, name := range order {
 		p := provs[name]
-		key := os.Getenv(p.KeyEnv)
-		if key == "" {
-			attempts = append(attempts, map[string]string{"provider": name, "error": "no api key"})
+		key, keyErr := providerKey(r.Context(), name, p)
+		if keyErr != nil {
+			attempts = append(attempts, map[string]string{"provider": name, "error": keyErr.Error()})
 			continue
 		}
 		if breakerOpen(name) {

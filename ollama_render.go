@@ -13,7 +13,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -42,9 +41,9 @@ func serveOllama(w http.ResponseWriter, r *http.Request, payload map[string]any,
 	anyFailover := false
 	for _, name := range order {
 		p := provs[name]
-		key := os.Getenv(p.KeyEnv)
-		if key == "" {
-			attempts = append(attempts, map[string]string{"provider": name, "error": "no api key"})
+		key, keyErr := providerKey(r.Context(), name, p)
+		if keyErr != nil {
+			attempts = append(attempts, map[string]string{"provider": name, "error": keyErr.Error()})
 			continue
 		}
 		if breakerOpen(name) {
