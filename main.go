@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,7 +20,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.13.1"
+const Version = "1.14.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -300,6 +301,12 @@ const (
 type breakerEntry struct {
 	fails     int
 	openUntil time.Time
+	// held parks the provider until a probe says it works again: a bill that is unpaid or
+	// a key that was revoked does not fix itself in a minute, and hammering it once a
+	// minute only produces noise.
+	held      bool
+	nextProbe time.Time
+	probeGap  time.Duration
 }
 
 var (
@@ -311,7 +318,11 @@ func breakerOpen(p string) bool {
 	brMu.Lock()
 	defer brMu.Unlock()
 	e, ok := breakers[p]
-	return ok && time.Now().Before(e.openUntil)
+	if !ok {
+		return false
+	}
+	// A held provider is out until a probe releases it, no matter how much time passes.
+	return e.held || nowFn().Before(e.openUntil)
 }
 
 func breakerFail(p string) {
@@ -322,9 +333,13 @@ func breakerFail(p string) {
 		e = &breakerEntry{}
 		breakers[p] = e
 	}
+	if e.held {
+		// Already parked indefinitely; a further failure does not change the verdict.
+		return
+	}
 	e.fails++
 	if e.fails >= breakAfter {
-		e.openUntil = time.Now().Add(breakSeconds)
+		e.openUntil = nowFn().Add(breakSeconds)
 	}
 }
 
@@ -339,14 +354,22 @@ func breakerSnapshot() map[string]any {
 	defer brMu.Unlock()
 	out := map[string]any{}
 	for p, e := range breakers {
-		if e.fails == 0 {
+		if e.fails == 0 && !e.held {
 			continue
 		}
 		secs := 0.0
-		if d := time.Until(e.openUntil); d > 0 {
+		if d := e.openUntil.Sub(nowFn()); d > 0 {
 			secs = d.Seconds()
 		}
-		out[p] = map[string]any{"fails": e.fails, "open_for_s": secs}
+		entry := map[string]any{"fails": e.fails, "open_for_s": secs}
+		if e.held {
+			// A held provider is out until the probe succeeds, so an operator needs to see
+			// that it is not a 60-second window and when the next look is.
+			entry["held"] = true
+			entry["next_probe_s"] = e.nextProbe.Sub(nowFn()).Seconds()
+			entry["probe_gap_s"] = e.probeGap.Seconds()
+		}
+		out[p] = entry
 	}
 	return out
 }
@@ -625,7 +648,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			log.Printf("provider %s failed: %v", name, err)
-			breakerFail(name)
+			breakerFailWith(name, err)
 			anyFailover = true
 			attempts = append(attempts, map[string]string{
 				"provider": name, "error": err.Error()})
@@ -715,7 +738,7 @@ func handleSystemOne(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			log.Printf("provider %s failed: %v", name, err)
-			breakerFail(name)
+			breakerFailWith(name, err)
 			anyFailover = true
 			attempts = append(attempts, map[string]string{
 				"provider": name, "error": err.Error()})
@@ -758,7 +781,7 @@ func forwardSystemOne(w http.ResponseWriter, r *http.Request, name string,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+		return newUpstreamError(resp.StatusCode, string(detail))
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -938,6 +961,12 @@ func main() {
 	} else {
 		log.Printf("auth: DISABLED — do not expose this listener publicly")
 	}
+
+	// The probe loop runs in this process: a held provider must be noticed even if no
+	// traffic arrives for hours, and a request must never be the thing that tests it.
+	probeCtx, stopProber := context.WithCancel(context.Background())
+	defer stopProber()
+	startProber(probeCtx)
 
 	log.Printf("offpeak-router on %s  shadow=%v  providers=%d", cfgListen, shadow, len(provs))
 	srv := &http.Server{

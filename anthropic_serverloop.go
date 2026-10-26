@@ -240,7 +240,7 @@ func postRound(client *http.Request, p *Provider, key string, body map[string]an
 	if resp.StatusCode >= 400 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+		return nil, newUpstreamError(resp.StatusCode, string(detail))
 	}
 	return resp, nil
 }

@@ -103,7 +103,7 @@ func renderOllama(w http.ResponseWriter, r *http.Request, name string, p *Provid
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+		return newUpstreamError(resp.StatusCode, string(detail))
 	}
 
 	w.Header().Set("X-Router-Provider", name)

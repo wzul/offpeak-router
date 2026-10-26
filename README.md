@@ -359,6 +359,31 @@ b3: <32 hex>-<16 hex>-1-<16 hex>
 Accept-Encoding: gzip, deflate, br, zstd
 ```
 
+### Held out, not retried every minute
+
+A 60-second cooldown suits a hiccup and misfits an unpaid bill. Failures are therefore split
+by meaning: `402`, `401`, and a `403` whose body mentions payment, billing, subscription, quota
+or credit **hold** the provider out indefinitely; `429`, `5xx` and transport errors keep the
+ordinary cooldown.
+
+While held, the provider is skipped by traffic entirely, and a probe loop inside the router
+decides when it comes back: first look after a minute, then backing off to hourly. The probe is
+one token on a chat model the provider serves - the cheapest request that answers the real
+question, which is whether the account works right now, not whether the key is well formed.
+A successful probe releases the hold immediately and the provider returns to its normal place
+(including the pinned slot).
+
+```
+GET /status   →  {"ollama-lenjan": {"held": true, "next_probe_s": 42, "probe_gap_s": 60, …}}
+journalctl    →  provider ollama-lenjan held out (payment required); probing every 1m0s …
+                 provider ollama-lenjan still unavailable; next probe in 2m0s
+                 provider ollama-lenjan answered a probe; available again
+```
+
+A provider that serves no chat model cannot be probed and stays held rather than being
+released on a guess; `clef`-only accounts would need the `/v1/systemone` shape added to the
+probe before they could recover on their own.
+
 ### The spare account
 
 `ollama-lenjan` is a second ollama.com account with `First: true`. It is tried before every
