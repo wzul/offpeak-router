@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.8.0"
+const Version = "1.9.0"
 
 // DefaultUserAgent matters more than it looks: Cloudflare sits in front of at
 // least one provider and returns 403 to Go's default "Go-http-client/1.1" and
@@ -846,6 +846,10 @@ func newMux() *http.ServeMux {
 	mux.HandleFunc("/status", withAuth(handleStatus))
 	mux.HandleFunc("/v1/models", withAuth(handleModels))
 	mux.HandleFunc("/v1/chat/completions", withAuth(handleChat))
+	// Anthropic Messages dialect: the clients that speak it cannot use any other
+	// route here.
+	mux.HandleFunc("/v1/messages", withAuth(handleMessages))
+	mux.HandleFunc("/v1/messages/count_tokens", withAuth(handleCountTokens))
 	mux.HandleFunc("/v1/systemone", withAuth(handleSystemOne))
 	// Web layer: same bearer auth and the same ledger host as the model routes,
 	// so a client can point its whole web toolset here instead of a separate key.

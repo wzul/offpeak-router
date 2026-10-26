@@ -366,6 +366,8 @@ pricing page and keep it current. An empty list means "never peaks".
 | path | purpose |
 |---|---|
 | `POST /v1/chat/completions` | proxy — streaming and non-streaming |
+| `POST /v1/messages` | Anthropic Messages dialect — request and reply translated, including the SSE event grammar, so Claude Code / `@anthropic-ai/sdk` / Cursor in Anthropic mode can use the router |
+| `POST /v1/messages/count_tokens` | Anthropic token counting, measured with a one-token upstream call rather than guessed |
 | `POST /v1/systemone` | proxy for decision models (one state + typed schema in) |
 | `POST /v1/search` · `GET /v1/search?q=` | web search — Brave or DuckDuckGo, no key required |
 | `POST /v1/fetch` · `GET /v1/fetch?url=` | fetch a page and return title + readable text; non-public targets refused |
@@ -377,6 +379,35 @@ pricing page and keep it current. An empty list means "never peaks".
 | `POST /api/web_search` | web search in Ollama Cloud's shape — `{query, max_results}` → `{results:[{title,url,content}]}` |
 | `POST /api/web_fetch` | page fetch in Ollama Cloud's shape — `{url}` → `{title,content,links[]}` |
 | `GET /status` | per provider: peak flag, allowance, spend, remaining, `hard_cap`, whether the key is present — plus the live order and breaker state |
+
+### The Anthropic dialect
+
+`POST /v1/messages` accepts the Messages API and answers in it. Point a client at it
+with `ANTHROPIC_BASE_URL=https://<router>` and the router's bearer token.
+
+What maps, and what does not:
+
+| Anthropic | here |
+| --- | --- |
+| `system` (string or blocks) | one system message, blocks joined |
+| `image` blocks | `image_url` content parts; base64 becomes a data URL |
+| `tool_use` / `tool_result` | `tool_calls` on the assistant message / a `role: "tool"` message |
+| `tools`, `tool_choice` (`auto`/`any`/`tool`/`none`) | `tools`, and `auto`/`required`/`{type:"function"}`/`none` |
+| `stop_sequences` | `stop` |
+| `top_k` | **dropped** — no OpenAI equivalent exists, and forwarding it draws a 400 that looks like a provider fault |
+| `stop_reason` | from the upstream `finish_reason`: `end_turn`, `max_tokens`, `tool_use` |
+| `usage.input_tokens` / `output_tokens` | `prompt_tokens` / `completion_tokens` |
+| `thinking` blocks in input | dropped: the signature cannot be verified here |
+| a reply's `reasoning_content` | a `thinking` block with an empty signature — dropping it would leave a thinking model looking mute |
+
+Streaming emits the Anthropic event sequence (`message_start`, `content_block_start`,
+`content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`), which is
+not the OpenAI grammar with renamed fields. A thinking block is closed before the text
+block opens, because clients render blocks in index order.
+
+`count_tokens` is measured, not estimated: a `max_tokens: 1` completion on the same
+provider returns the real `prompt_tokens`. It costs one output token, and it is the
+only honest number available without shipping a tokenizer.
 | `GET /health` | liveness, plus which keys are present (never their values) |
 
 ## Why Go
