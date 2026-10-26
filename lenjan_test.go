@@ -29,12 +29,29 @@ func TestFirstProviderRunsAheadOfPeakPolicy(t *testing.T) {
 			t.Errorf("%02d:00 order = %v, want ollama-lenjan first", hour, order)
 		}
 	}
-	// The pin is not global: a model the spare cannot serve must not put it in front.
-	order := candidateOrder(mon(13), zero(), "clef")
-	for _, name := range order {
-		if name == "ollama-lenjan" {
-			t.Errorf("clef order includes the spare, which cannot serve clef: %v", order)
+	// clef rides the same subscription, so it is pinned too - including at peak.
+	if order := candidateOrder(mon(13), zero(), "clef"); len(order) == 0 || order[0] != "ollama-lenjan" {
+		t.Errorf("clef order = %v, want ollama-lenjan first", order)
+	}
+
+	// The pin is not global: a model the spare cannot serve must not put it in front. This
+	// uses a fixture rather than the live registry, because every model the ollama accounts
+	// serve is served by both of them.
+	prevProvs := provs
+	t.Cleanup(func() { provs = prevProvs })
+	provs = map[string]*Provider{
+		"spare": {Base: "http://spare", KeyEnv: "SPARE_KEY", First: true,
+			Models: map[string]ModelRoute{"alpha": {ID: "a"}}},
+		"other": {Base: "http://other", KeyEnv: "OTHER_KEY",
+			Models: map[string]ModelRoute{"beta": {ID: "b"}}},
+	}
+	for _, name := range candidateOrder(mon(13), zero(), "beta") {
+		if name == "spare" {
+			t.Error("the pin put a provider in front for a model it does not serve")
 		}
+	}
+	if order := candidateOrder(mon(13), zero(), "alpha"); len(order) == 0 || order[0] != "spare" {
+		t.Errorf("alpha order = %v, want spare first", order)
 	}
 }
 

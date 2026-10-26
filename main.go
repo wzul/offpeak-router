@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.13.0"
+const Version = "1.13.1"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -144,6 +144,9 @@ func defaultProviders() map[string]*Provider {
 			Models: map[string]ModelRoute{
 				"deepseek-v4.1-flash": {ID: "deepseek-v4.1-flash:1017"},
 				"gemma4":              {ID: "gemma4:31b"},
+				// clef rides the same subscription: the /v1/systemone decision route, with
+				// its own rate card, so a pinned request there is still billed correctly.
+				"clef": {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
 			},
 			KeyEnv: "OLLAMA_LENJAN_API_KEY",
 			First:  true,
