@@ -365,8 +365,13 @@ Point a session here and every Claude model id lands on the one model this route
 
 ```
 ANTHROPIC_BASE_URL=https://router.wanzul-hosting.com
-ANTHROPIC_API_KEY=<router bearer token>
+ANTHROPIC_API_KEY=<router token>
 ```
+
+The Anthropic dialect specifies `x-api-key`, so that header is accepted as well as
+`Authorization: Bearer`. A client written against the dialect sends no other auth, and
+telling it to reconfigure would be a compatibility gap dressed up as a security decision.
+Both are compared in constant time against the one router token.
 
 `claude-sonnet-4-5-20250929`, `claude-haiku-4-5`, `claude-opus-5-5`, `claude-3.5-sonnet` - any
 `claude-*` prefix resolves to `deepseek-v4.1-flash`. It is a prefix rule rather than a table

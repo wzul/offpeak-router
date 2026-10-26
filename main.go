@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.12.0"
+const Version = "1.12.1"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -414,6 +414,16 @@ func withAuth(h http.HandlerFunc) http.HandlerFunc {
 func authorized(r *http.Request) bool {
 	if authToken == "" {
 		return true
+	}
+	// Two header shapes, one token. `Authorization: Bearer` is what OpenAI-shaped clients
+	// and Hermes send; `x-api-key` is what the Anthropic dialect specifies, and a client
+	// written against that dialect sends nothing else. Rejecting the second would mean
+	// telling every such client to reconfigure its auth - a compatibility gap dressed up
+	// as a security decision.
+	if key := r.Header.Get("x-api-key"); key != "" {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(authToken)) == 1 {
+			return true
+		}
 	}
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")

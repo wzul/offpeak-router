@@ -605,3 +605,40 @@ func TestStaticEndpoints(t *testing.T) {
 		t.Error("status missing providers")
 	}
 }
+
+// The Anthropic dialect specifies x-api-key; OpenAI-shaped clients send a bearer token.
+// Both must open the same door, and a wrong value must not.
+func TestAuthAcceptsBothHeaderShapes(t *testing.T) {
+	old := authToken
+	t.Cleanup(func() { authToken = old })
+	authToken = "secret-token"
+
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    int
+	}{
+		{"bearer", map[string]string{"Authorization": "Bearer secret-token"}, 200},
+		{"x-api-key", map[string]string{"x-api-key": "secret-token"}, 200},
+		{"bearer salah", map[string]string{"Authorization": "Bearer nope"}, 401},
+		{"x-api-key salah", map[string]string{"x-api-key": "nope"}, 401},
+		{"tiada", map[string]string{}, 401},
+	}
+	for _, c := range cases {
+		req, _ := http.NewRequest("GET", srv.URL+"/api/version", nil)
+		for k, v := range c.headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, resp.StatusCode, c.want)
+		}
+	}
+}
