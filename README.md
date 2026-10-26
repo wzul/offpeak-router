@@ -359,6 +359,49 @@ b3: <32 hex>-<16 hex>-1-<16 hex>
 Accept-Encoding: gzip, deflate, br, zstd
 ```
 
+### Claude Code
+
+Point a session here and every Claude model id lands on the one model this router serves:
+
+```
+ANTHROPIC_BASE_URL=https://router.wanzul-hosting.com
+ANTHROPIC_API_KEY=<router bearer token>
+```
+
+`claude-sonnet-4-5-20250929`, `claude-haiku-4-5`, `claude-opus-5-5`, `claude-3.5-sonnet` - any
+`claude-*` prefix resolves to `deepseek-v4.1-flash`. It is a prefix rule rather than a table
+so a new dated id keeps working, and the response echoes the id the client sent. Names that
+are not Claude-shaped still fail with `unknown model`, because a typo should not be silently
+rerouted.
+
+Server tools are executed here, not forwarded. A request declaring
+
+```json
+{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+```
+
+turns into a function the upstream model can call, and the router runs the search itself:
+it asks, we search, it reads the results and answers - inside one request. The client
+receives the blocks Anthropic clients expect:
+
+```
+text                  "I'll look that up."
+server_tool_use       {id, name: "web_search", input: {query}}
+web_search_tool_result{content: [{type: "web_search_result", title, url, encrypted_content}]}
+text                  "…the answer, from the results"
+```
+
+`max_uses`, `allowed_domains` and `blocked_domains` are honoured; exceeding `max_uses`
+produces the documented `max_uses_exceeded` error block instead of a silent extra search;
+`usage.server_tool_use.web_search_requests` counts what was actually run. `web_fetch_*` is
+answered the same way with `web_fetch_tool_result`. Streaming keeps working: the search
+blocks are written as they happen and the answer streams live after them.
+
+Two limits worth knowing. `encrypted_content` is sealed by this router rather than by
+Anthropic, so the snippets survive a later turn when the client sends the blocks back - a
+conversation that never returns them simply loses the text. And citations are not generated:
+the model is told the URLs, but no `citations` array is attached to its text.
+
 That last header is only honest because the router can read the answers: a transport
 wrapper sets the full set and decodes `gzip`, `deflate` (zlib-wrapped or raw), `br` and
 `zstd` before any handler sees the body. Go's own transport decompresses gzip alone, and

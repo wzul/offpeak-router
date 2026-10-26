@@ -43,6 +43,10 @@ var (
 	fetchCalls  atomic.Int64
 )
 
+// ddgEndpoint is the DuckDuckGo HTML endpoint. A variable, not a literal, so a test can
+// serve it and a deployment can route searches through a proxy.
+var ddgEndpoint = "https://html.duckduckgo.com/html/"
+
 type webHit struct {
 	Title       string `json:"title"`
 	URL         string `json:"url"`
@@ -349,7 +353,7 @@ var (
 func ddgSearch(ctx context.Context, q string, limit int) ([]webHit, error) {
 	form := url.Values{"q": {q}, "kl": {"wt-wt"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://html.duckduckgo.com/html/", strings.NewReader(form.Encode()))
+		ddgEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}

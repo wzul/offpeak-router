@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -61,6 +62,12 @@ type anthropicTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// Server tools: the type carries the version (web_search_20250305), and the client
+	// expects this side to execute them. A custom function tool has no type or "custom".
+	Type           string   `json:"type,omitempty"`
+	MaxUses        int      `json:"max_uses,omitempty"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 type anthropicToolChoice struct {
@@ -186,6 +193,23 @@ func toOpenAIChat(req *anthropicRequest) (map[string]any, error) {
 			case "thinking":
 				// Dropped: the signature cannot be verified here, and forwarding it
 				// to an OpenAI upstream is meaningless.
+			case "server_tool_use":
+				// Our own executed search, sent back on the next turn. The upstream
+				// model must see it as the tool call it asked for.
+				args := "{}"
+				if len(blk.Input) > 0 {
+					args = string(blk.Input)
+				}
+				toolCalls = append(toolCalls, map[string]any{
+					"id": blk.ID, "type": "function",
+					"function": map[string]any{"name": blk.Name, "arguments": args},
+				})
+			case "web_search_tool_result", "web_fetch_tool_result":
+				// The results the model already read. Losing them would leave the next
+				// turn with citations pointing at nothing.
+				toolResults = append(toolResults, map[string]any{
+					"role": "tool", "tool_call_id": blk.ToolUseID,
+					"content": historyText(blk)})
 			}
 		}
 
@@ -320,10 +344,25 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Server tools are this side's work: the client declares web_search and expects the
+	// API to run it. They are split off before translation and turned into functions the
+	// upstream model can call, so the loop can execute them inside this request.
+	functions, servers, splitErr := splitTools(req.Tools)
+	if splitErr != nil {
+		anthropicError(w, 400, "invalid_request_error", splitErr.Error())
+		return
+	}
+	declared := req.Tools
+	req.Tools = functions
 	payload, err := toOpenAIChat(&req)
+	req.Tools = declared
 	if err != nil {
 		anthropicError(w, 400, "invalid_request_error", err.Error())
 		return
+	}
+	if len(servers) > 0 {
+		existing, _ := payload["tools"].([]any)
+		payload["tools"] = append(existing, syntheticTools(servers)...)
 	}
 
 	now := nowFn()
@@ -361,15 +400,27 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		if anyFailover {
 			w.Header().Set("X-Router-Failover", "true")
 		}
-		if err := serveAnthropic(w, r, name, p, key, payload, req.Stream, now, model, req.Model); err == nil {
+		var serveErr error
+		if len(servers) > 0 {
+			serveErr = serveAnthropicServerTools(w, r, name, p, key, payload, &req, servers,
+				req.Stream, now, model, req.Model)
+		} else {
+			serveErr = serveAnthropic(w, r, name, p, key, payload, req.Stream, now, model, req.Model)
+		}
+		if serveErr == nil {
 			breakerOK(name)
 			return
-		} else {
-			log.Printf("provider %s failed (anthropic/messages): %v", name, err)
-			breakerFail(name)
-			anyFailover = true
-			attempts = append(attempts, map[string]string{"provider": name, "error": err.Error()})
 		}
+		log.Printf("provider %s failed (anthropic/messages): %v", name, serveErr)
+		breakerFail(name)
+		// A failure after the body started cannot be retried elsewhere: the client is
+		// already reading this response.
+		var written alreadyWritten
+		if errors.As(serveErr, &written) {
+			return
+		}
+		anyFailover = true
+		attempts = append(attempts, map[string]string{"provider": name, "error": serveErr.Error()})
 	}
 	anthropicError(w, 502, "api_error", "all providers failed: "+summariseAttempts(attempts))
 }
@@ -734,6 +785,14 @@ func handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		anthropicError(w, 400, "invalid_request_error", "unknown model: "+req.Model)
 		return
 	}
+	// Server tools never reach the upstream: they are executed by this router, and a
+	// token count for the request does not include work the API would do.
+	functions, _, splitErr := splitTools(req.Tools)
+	if splitErr != nil {
+		anthropicError(w, 400, "invalid_request_error", splitErr.Error())
+		return
+	}
+	req.Tools = functions
 	payload, err := toOpenAIChat(&req)
 	if err != nil {
 		anthropicError(w, 400, "invalid_request_error", err.Error())

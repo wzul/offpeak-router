@@ -19,7 +19,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.11.0"
+const Version = "1.12.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -168,6 +168,14 @@ func resolveModel(requested string) (string, bool) {
 		}
 		if _, ok := p.Models[requested]; ok {
 			return requested, true
+		}
+	}
+	// Claude ids land on the canonical chat model. A Claude Code session sends the
+	// model it was configured with plus a small model for its own housekeeping, and an
+	// unknown-model 400 there ends the session before any work starts.
+	if isClaudeModelID(requested) {
+		if target := claudeAliasTarget(); target != "" {
+			return target, true
 		}
 	}
 	for _, p := range provs {
@@ -490,6 +498,11 @@ func handleModels(w http.ResponseWriter, _ *http.Request) {
 			"capability_providers": capabilityProvidersFor(m),
 			"input_modalities":     inputModalities(m),
 		})
+		// A wildcard, advertised deliberately: every Claude id resolves here, so a
+		// client cannot be told a fixed list it might outgrow.
+		if m == claudeAliasTarget() {
+			data[len(data)-1]["alias_patterns"] = []string{"claude-*"}
+		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
