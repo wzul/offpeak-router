@@ -237,6 +237,38 @@ curl -s -X POST http://127.0.0.1:8788/api/generate \
 - **A decision model is refused on `/api/chat`** with a 400 naming `/v1/systemone`,
   and an unknown model answers Ollama's own 404 wording.
 
+### Web search and fetch in Ollama Cloud's dialect
+
+Ollama's own API puts these at `/api/web_search` and `/api/web_fetch`, with a different
+body from the router's `/v1` routes. A client built on the ollama SDK calls those names
+and parses those fields, so both are served from one implementation:
+
+```bash
+curl -s -X POST http://127.0.0.1:8788/api/web_search \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"what is ollama?","max_results":3}'
+# {"results":[{"title":"…","url":"…","content":"snippet"}]}
+
+curl -s -X POST http://127.0.0.1:8788/api/web_fetch \
+  -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://go.dev/doc/"}'
+# {"title":"…","content":"readable text","links":["https://…","https://…"]}
+```
+
+- **Ollama's field names, not the router's.** The snippet is `content` (the `/v1` route
+  calls it `description`) and there is no `position`. Both spellings are never sent, or a
+  caller would start depending on something the vendor does not have.
+- **`links` is always an array**, `[]` when the page has none — a client iterating over
+  `null` crashes instead of showing an empty list.
+- **`max_results` defaults to 5 and is capped at 10**, matching Ollama's own bounds; asking
+  for more returns 10 rather than silently behaving better than the vendor.
+- **POST only**, like Ollama. A `GET /api/web_search?q=…` answers 405 instead of quietly
+  working and making a client ship code the vendor would reject.
+- **Links are resolved and deduplicated** against the page they came from, with fragments
+  dropped and non-http(s) schemes skipped, capped at 100 so a large site's navigation does
+  not bury the content.
+- The `/v1/search` and `/v1/fetch` routes keep the gateway's own shape; these are additive.
+
 ## Configuration
 
 Works out of the box with three providers of DeepSeek V4.1 Flash. For anything
@@ -314,6 +346,8 @@ pricing page and keep it current. An empty list means "never peaks".
 | `GET /api/version` | Ollama-style version string, so that probe succeeds |
 | `POST /api/chat` · `POST /api/generate` | chat in Ollama's dialect — request translated to the OpenAI payload, answer translated back (NDJSON when streaming) |
 | `POST /api/show` · `POST /api/ps` | model details from the table; nothing is ever resident locally |
+| `POST /api/web_search` | web search in Ollama Cloud's shape — `{query, max_results}` → `{results:[{title,url,content}]}` |
+| `POST /api/web_fetch` | page fetch in Ollama Cloud's shape — `{url}` → `{title,content,links[]}` |
 | `GET /status` | per provider: peak flag, allowance, spend, remaining, `hard_cap`, whether the key is present — plus the live order and breaker state |
 | `GET /health` | liveness, plus which keys are present (never their values) |
 

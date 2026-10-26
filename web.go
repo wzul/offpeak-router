@@ -51,11 +51,12 @@ type webHit struct {
 }
 
 type fetchDoc struct {
-	URL     string `json:"url"`
-	Title   string `json:"title"`
-	Content string `json:"content"`
-	Status  int    `json:"status"`
-	Error   string `json:"error,omitempty"`
+	URL     string   `json:"url"`
+	Title   string   `json:"title"`
+	Content string   `json:"content"`
+	Status  int      `json:"status"`
+	Links   []string `json:"links,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 // webClient never follows a redirect into private space: the router sits on a
@@ -503,6 +504,7 @@ func fetchOne(ctx context.Context, target string) fetchDoc {
 	}
 	if strings.Contains(ct, "html") || (ct == "" && strings.Contains(string(raw[:min(512, len(raw))]), "<")) {
 		doc.Title, doc.Content = htmlToText(string(raw))
+		doc.Links = extractLinks(string(raw), u)
 	} else {
 		doc.Content = strings.TrimSpace(string(raw))
 	}
@@ -543,6 +545,49 @@ func htmlToText(page string) (title, text string) {
 		}
 	}
 	return title, strings.Join(out, "\n")
+}
+
+// maxLinks caps the links a page can report: a large site's nav would otherwise
+// bury the content a caller asked for.
+const maxLinks = 100
+
+// The capture must include a fragment: excluding "#" stops the closing quote
+// from matching and the whole anchor is skipped, links and all.
+var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
+
+// extractLinks pulls the page's anchors out as absolute http(s) URLs, in document
+// order, without duplicates. Relative hrefs resolve against the page they came
+// from, which is how a reader would follow them.
+func extractLinks(page string, base *url.URL) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range hrefRe.FindAllStringSubmatch(page, -1) {
+		raw := strings.TrimSpace(m[1])
+		// A bare fragment is a link to the page you are already on; it is never
+		// a reference worth handing back.
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+		ref, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		abs := base.ResolveReference(ref)
+		if abs.Scheme != "http" && abs.Scheme != "https" {
+			continue
+		}
+		abs.Fragment = ""
+		key := abs.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+		if len(out) >= maxLinks {
+			break
+		}
+	}
+	return out
 }
 
 func stripTags(s string) string { return strings.TrimSpace(tagRe.ReplaceAllString(s, "")) }
