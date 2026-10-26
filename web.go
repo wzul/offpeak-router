@@ -551,9 +551,11 @@ func htmlToText(page string) (title, text string) {
 // bury the content a caller asked for.
 const maxLinks = 100
 
-// The capture must include a fragment: excluding "#" stops the closing quote
-// from matching and the whole anchor is skipped, links and all.
-var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
+// Anchors only: a bare href attribute also matches <link rel="stylesheet">, so a
+// page's font and analytics hosts would arrive as "links" a model may then cite.
+// The capture must include a fragment, or the closing quote stops matching and
+// the whole anchor is skipped.
+var hrefRe = regexp.MustCompile(`(?is)<a\b[^>]*?href\s*=\s*["']([^"']+)["']`)
 
 // extractLinks pulls the page's anchors out as absolute http(s) URLs, in document
 // order, without duplicates. Relative hrefs resolve against the page they came

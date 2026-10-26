@@ -106,6 +106,21 @@ func TestExtractLinksResolvesAndDedupes(t *testing.T) {
 	}
 }
 
+// Assets are not links a reader can follow; handing back a font host or an
+// analytics beacon makes a model cite junk.
+func TestExtractLinksIgnoresNonAnchorHrefs(t *testing.T) {
+	page := `<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=x">` +
+		`<link rel="preload" href="https://www.googletagmanager.com/gtm.js">` +
+		`<script src="https://cdn.example/x.js"></script>` +
+		`<a href="https://real.example/page">real</a>`
+	base, _ := url.Parse("https://site.example/")
+
+	got := extractLinks(page, base)
+	if len(got) != 1 || got[0] != "https://real.example/page" {
+		t.Fatalf("links = %v, want only the anchor", got)
+	}
+}
+
 func TestExtractLinksCapsOutput(t *testing.T) {
 	var sb strings.Builder
 	for i := 0; i < maxLinks+25; i++ {
