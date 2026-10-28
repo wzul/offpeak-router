@@ -61,6 +61,10 @@ type fetchDoc struct {
 	Status  int      `json:"status"`
 	Links   []string `json:"links,omitempty"`
 	Error   string   `json:"error,omitempty"`
+	// Refused marks a target this router would not contact at all. That is the caller's
+	// mistake, not an upstream fault, and the two need different status codes: retrying a
+	// blocked address will never work, while an upstream timeout might.
+	Refused bool `json:"-"`
 }
 
 // webClient never follows a redirect into private space: the router sits on a
@@ -362,7 +366,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		limit = maxSearchLimit
 	}
 
-	hits, backend, err := runSearch(r.Context(), q, limit)
+	hits, backend, err := routedSearch(r.Context(), q, limit)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"success": false,
 			"error": map[string]string{"message": err.Error(), "backend": backend}})
@@ -562,22 +566,61 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	docs := make([]fetchDoc, 0, len(targets))
+	failed := 0
 	for _, t := range targets {
-		docs = append(docs, fetchOne(r.Context(), t))
+		doc := routedFetch(r.Context(), t)
+		_ = fetchOneFn
+		if doc.Error != "" {
+			failed++
+		}
+		docs = append(docs, doc)
 	}
 	fetchCalls.Add(1)
-	writeJSON(w, 200, map[string]any{"success": true, "data": docs})
+
+	// A failed fetch is not a successful response carrying empty strings. Reporting 200 with
+	// success:true here made a dead URL indistinguishable from a blank page, so a caller that
+	// only reads the status code - which is what every HTTP client does first - treated the
+	// failure as content, and the real cause stayed buried in a field nobody checked.
+	status := 200
+	success := true
+	if failed > 0 {
+		success = false
+	}
+	if failed == len(docs) {
+		// Nothing was fetched: say so with a status a client cannot ignore. One dead URL among
+		// several is a partial result and keeps 200, with success:false and the errors listed.
+		status = http.StatusBadGateway
+		for _, d := range docs {
+			if d.Refused {
+				// A target this router will never fetch is a request error: repeating it is
+				// pointless, and 502 would invite a retry.
+				status = http.StatusBadRequest
+				break
+			}
+		}
+	}
+	body := map[string]any{"success": success, "data": docs}
+	if failed > 0 {
+		body["failed"] = failed
+	}
+	writeJSON(w, status, body)
 }
+
+// fetchOneFn is what the routes call; fetchOne is the implementation. A seam, so a route
+// test does not need the network - the SSRF guard inside fetchOne stays exactly as it is.
+var fetchOneFn = func(ctx context.Context, target string) fetchDoc { return fetchOne(ctx, target) }
 
 func fetchOne(ctx context.Context, target string) fetchDoc {
 	doc := fetchDoc{URL: target}
 	u, err := url.Parse(strings.TrimSpace(target))
 	if err != nil {
 		doc.Error = "invalid URL"
+		doc.Refused = true
 		return doc
 	}
 	if err := guardURL(u); err != nil {
 		doc.Error = err.Error()
+		doc.Refused = true
 		return doc
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

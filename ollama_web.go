@@ -38,14 +38,17 @@ func handleOllamaWebSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := ollamaSearchLimit(body.MaxResults)
 
-	hits, _, err := runSearch(r.Context(), body.Query, limit)
+	hits, backend, err := routedSearch(r.Context(), body.Query, limit)
 	searchCalls.Add(1)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "search failed: " + err.Error()})
 		return
 	}
 
-	w.Header().Set("X-Router-Backend", searchBackendName())
+	if backend == "" {
+		backend = searchBackendName()
+	}
+	w.Header().Set("X-Router-Backend", backend)
 	writeJSON(w, 200, map[string]any{"results": ollamaSearchResults(hits)})
 }
 
@@ -66,12 +69,18 @@ func handleOllamaWebFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc := fetchOne(r.Context(), body.URL)
+	doc, backend := routedFetchNamed(r.Context(), body.URL)
+	w.Header().Set("X-Router-Backend", backend)
 	fetchCalls.Add(1)
 	// A refused target is the caller's mistake, not an upstream fault: report it
 	// as 400 so it is not retried, and keep the guard's wording.
-	if doc.Error != "" && doc.Status == 0 {
+	if doc.Error != "" && doc.Refused {
 		writeJSON(w, 400, map[string]any{"error": doc.Error})
+		return
+	}
+	if doc.Error != "" && doc.Status == 0 {
+		// Resolved but unreachable: an upstream problem, not a malformed request.
+		writeJSON(w, 502, map[string]any{"error": doc.Error})
 		return
 	}
 	if doc.Error != "" && doc.Status >= 400 {

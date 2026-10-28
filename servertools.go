@@ -42,8 +42,8 @@ const (
 // answer them directly: the real implementations run behind the SSRF guard, which refuses
 // loopback by design and must not be loosened for the sake of a test.
 var (
-	searchForModel = runSearch
-	fetchForModel  = fetchOne
+	searchForModel = routedSearch
+	fetchForModel  = routedFetch
 )
 
 // defaultSearchResults is how many hits one search hands the model. Anthropic returns

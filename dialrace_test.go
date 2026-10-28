@@ -8,8 +8,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -125,5 +127,76 @@ func TestSafeDialContextTriesEveryResolvedAddress(t *testing.T) {
 	}
 	if want := "93.184.216.34:443"; tried[len(tried)-1] != want {
 		t.Errorf("last attempt = %q, want %q", tried[len(tried)-1], want)
+	}
+}
+
+// A fetch that failed must not be reported as a successful empty page. Every HTTP client
+// reads the status code first; a 200 here means the caller keeps an empty document and never
+// learns why.
+func TestFetchRouteReportsFailure(t *testing.T) {
+	prevFetch := fetchForModel
+	t.Cleanup(func() { fetchForModel = prevFetch })
+	fetchForModel = func(ctx context.Context, target string) fetchDoc {
+		if strings.Contains(target, "hidup") {
+			return fetchDoc{URL: target, Status: 200, Title: "Hidup", Content: "kandungan"}
+		}
+		return fetchDoc{URL: target, Error: "dial tcp: i/o timeout"}
+	}
+	// The route calls fetchOne directly, so the seam is replaced for this test.
+	prevOne := fetchOneFn
+	t.Cleanup(func() { fetchOneFn = prevOne })
+	fetchOneFn = fetchForModel
+
+	router := httptest.NewServer(newMux())
+	t.Cleanup(router.Close)
+
+	// Total failure: 502, never success:true.
+	resp, raw := postAnthropic(t, router.URL, "/v1/fetch", `{"url":"https://mati.example/"}`)
+	if resp.StatusCode != 502 {
+		t.Errorf("all-failed fetch returned HTTP %d, want 502: %s", resp.StatusCode, raw)
+	}
+	var gone struct {
+		Success *bool `json:"success"`
+		Data    []struct {
+			Error string `json:"error"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &gone); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gone.Success == nil || *gone.Success {
+		t.Errorf("success = %v on a total failure", gone.Success)
+	}
+	if len(gone.Data) != 1 || gone.Data[0].Error == "" {
+		t.Errorf("the per-URL error was dropped: %s", raw)
+	}
+
+	// Partial: 200, but success is still false.
+	resp, raw = postAnthropic(t, router.URL, "/v1/fetch",
+		`{"urls":["https://hidup.example/","https://mati.example/"]}`)
+	if resp.StatusCode != 200 {
+		t.Errorf("partial fetch returned HTTP %d, want 200", resp.StatusCode)
+	}
+	var part struct {
+		Success *bool `json:"success"`
+		Failed  int   `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(raw), &part); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if part.Success == nil || *part.Success {
+		t.Error("partial failure reported success:true")
+	}
+	if part.Failed != 1 {
+		t.Errorf("failed = %d, want 1", part.Failed)
+	}
+
+	// Clean: 200 and success:true.
+	resp, raw = postAnthropic(t, router.URL, "/v1/fetch", `{"url":"https://hidup.example/"}`)
+	if resp.StatusCode != 200 {
+		t.Errorf("good fetch returned HTTP %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(raw), `"success":true`) {
+		t.Errorf("a good fetch should stay success:true: %s", raw)
 	}
 }

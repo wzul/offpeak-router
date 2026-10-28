@@ -149,14 +149,20 @@ func TestHandleFetchRefusesInternalWithoutDialing(t *testing.T) {
 	if dialled {
 		t.Fatal("request was dialled: SSRF guard bypassed")
 	}
-	if rec.Code != 200 {
-		t.Fatalf("status = %d", rec.Code)
+	// A refused target is a request error, and the response must say so: this used to be a 200
+	// with an empty document, which every HTTP client reads as success.
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400 for a refused target", rec.Code)
 	}
 	var out struct {
-		Data []fetchDoc `json:"data"`
+		Success *bool      `json:"success"`
+		Data    []fetchDoc `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
+	}
+	if out.Success == nil || *out.Success {
+		t.Errorf("success = %v on a refused target", out.Success)
 	}
 	if len(out.Data) != 1 || out.Data[0].Error == "" {
 		t.Fatalf("expected a per-URL error, got %+v", out.Data)
