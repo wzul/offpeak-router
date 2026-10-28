@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,9 +24,17 @@ func TestDialRaceFallsBackToTheLiveAddress(t *testing.T) {
 	dead := net.ParseIP("2001:db8::1")
 	live := net.ParseIP("93.184.216.34")
 
+	// The dialer starts candidates from separate goroutines, so the recorder needs a lock:
+	// CI runs -race, and an unsynchronised append here is a data race in the test, not the code.
+	var mu sync.Mutex
 	var tried []string
+	record := func(s string) {
+		mu.Lock()
+		tried = append(tried, s)
+		mu.Unlock()
+	}
 	dial := func(ctx context.Context, ip net.IP) (net.Conn, error) {
-		tried = append(tried, ip.String())
+		record(ip.String())
 		if ip.Equal(dead) {
 			// Models the real failure: the address resolves and nothing ever answers.
 			<-ctx.Done()
@@ -46,6 +55,8 @@ func TestDialRaceFallsBackToTheLiveAddress(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Errorf("fallback took %s; a dead family must not cost the whole timeout", elapsed)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if len(tried) != 2 {
 		t.Errorf("tried %v, want both addresses", tried)
 	}
@@ -101,9 +112,12 @@ func TestSafeDialContextTriesEveryResolvedAddress(t *testing.T) {
 		return []net.IPAddr{{IP: dead}, {IP: live}}, nil
 	}
 
+	var mu sync.Mutex
 	var tried []string
 	webDialFn = func(ctx context.Context, network string, ip net.IP, port string) (net.Conn, error) {
+		mu.Lock()
 		tried = append(tried, ip.String()+":"+port)
+		mu.Unlock()
 		if ip.Equal(dead) {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -122,10 +136,12 @@ func TestSafeDialContextTriesEveryResolvedAddress(t *testing.T) {
 	if conn == nil {
 		t.Fatal("no connection")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if len(tried) != 2 {
 		t.Errorf("tried %v, want the dead address and then the live one", tried)
 	}
-	if want := "93.184.216.34:443"; tried[len(tried)-1] != want {
+	if want := "93.184.216.34:443"; len(tried) > 0 && tried[len(tried)-1] != want {
 		t.Errorf("last attempt = %q, want %q", tried[len(tried)-1], want)
 	}
 }
