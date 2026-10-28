@@ -301,3 +301,37 @@ func TestStatusNamesTheWebBackends(t *testing.T) {
 		t.Errorf("upstream_backends = %q, want the web-capable accounts named", out.Web.Backends)
 	}
 }
+
+// A search response must stay a search response. The vendor returns whole-page text in its
+// search results, and passing that through verbatim made a five-result query answer with a
+// megabyte of page bodies.
+func TestSearchDescriptionsAreSnippets(t *testing.T) {
+	long := strings.Repeat("perkataan panjang ", 4000) // ~68k characters
+	rig := &webRig{}
+	rig.server(t)
+	webRigProviders(t, rig.srv.URL)
+
+	// Re-point the fake upstream at an oversized result.
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
+			"title": "Besar", "url": "https://example.com/besar", "content": long,
+		}}})
+	}))
+	t.Cleanup(big.Close)
+	provs["ollama-lenjan"] = &Provider{Base: big.URL + "/v1", KeyEnv: "SPARE_KEY", First: true,
+		Web: true, Models: map[string]ModelRoute{"m": {ID: "m"}}}
+
+	hits, _, err := routedSearch(context.Background(), "apa-apa", 5)
+	if err != nil {
+		t.Fatalf("routedSearch: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d", len(hits))
+	}
+	if got := len(hits[0].Description); got > maxSnippetChars+8 {
+		t.Errorf("description is %d characters, want a snippet near %d", got, maxSnippetChars)
+	}
+	if !strings.HasSuffix(hits[0].Description, "…") {
+		t.Error("a truncated snippet should say it was cut")
+	}
+}

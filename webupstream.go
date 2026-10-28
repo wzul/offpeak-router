@@ -82,6 +82,24 @@ func webRequest(ctx context.Context, name string, p *Provider, path string, body
 	return raw, nil
 }
 
+// maxSnippetChars bounds a search result's description. Long enough to be a useful excerpt,
+// short enough that a five-result search stays a search response.
+const maxSnippetChars = 600
+
+// snippet trims text on a word boundary and marks the cut, so a truncated excerpt cannot be
+// mistaken for the end of the document.
+func snippet(s string, limit int) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= limit {
+		return s
+	}
+	cut := s[:limit]
+	if i := strings.LastIndexByte(cut, ' '); i > limit/2 {
+		cut = cut[:i]
+	}
+	return cut + "…"
+}
+
 // accountBlame reports whether a web failure says something about the ACCOUNT. A malformed or
 // unreachable URL is the caller's problem: counting it would let a handful of bad URLs open the
 // breaker on healthy accounts, which is how a gateway parks itself for a caller's typo.
@@ -141,7 +159,10 @@ func routedSearch(ctx context.Context, q string, limit int) ([]webHit, string, e
 		}
 		hits := make([]webHit, 0, len(out.Results))
 		for _, r := range out.Results {
-			hits = append(hits, webHit{Title: r.Title, URL: r.URL, Description: r.Content})
+			// The vendor's search results carry whole-page text where this router's older
+			// shape promised a description. /v1/search is the shape with a snippet, and a
+			// caller asking for five results should not receive a megabyte of page bodies.
+			hits = append(hits, webHit{Title: r.Title, URL: r.URL, Description: snippet(r.Content, maxSnippetChars)})
 		}
 		if len(hits) == 0 {
 			if firstErr == nil {
