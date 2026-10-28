@@ -141,32 +141,128 @@ func inLocalNet(ip net.IP) bool {
 
 // safeDialContext resolves once, refuses non-public results, then dials the
 // checked IP itself so the name cannot resolve differently a moment later.
+// safeDialContext resolves the host, drops anything non-public, and then tries every
+// remaining address - staggered, not just the first one.
+//
+// Picking ips[0] looked harmless and was not: the resolver returns addresses in RFC 6724
+// order, which puts IPv6 first, so on a host that advertises an IPv6 address and a default
+// route that does not actually route, every fetch of an IPv6-capable site died on
+// "dial tcp [2001:...]: i/o timeout". Search kept working because the search endpoint
+// happens to answer over IPv4, which is exactly the kind of half-broken that goes unnoticed.
 func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := lookupIPAddrs(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("resolve %s: no addresses", host)
 	}
-	chosen := ips[0].IP
-	for _, cand := range ips {
-		if !isBlockedIP(cand.IP) {
-			chosen = cand.IP
-			break
-		}
-	}
-	if isBlockedIP(chosen) {
+	addrs := dialCandidates(ips)
+	if len(addrs) == 0 {
 		return nil, fmt.Errorf("refusing to fetch %s: resolves to a non-public address", host)
 	}
-	return webDialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
+	conn, dialErr := dialRace(ctx, addrs, func(ctx context.Context, ip net.IP) (net.Conn, error) {
+		return webDialFn(ctx, network, ip, port)
+	})
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	return conn, nil
 }
 
+// dialFallbackDelay is how long the first address gets before the next one is tried as
+// well. Long enough that a working first choice normally wins outright, short enough that a
+// dead family costs a fraction of a second rather than the whole timeout.
+const dialFallbackDelay = 250 * time.Millisecond
+
+// lookupIPAddrs is a variable so a test can hand the dialer a known address list instead of
+// talking to DNS.
+var lookupIPAddrs = net.DefaultResolver.LookupIPAddr
+
 var webDialer = &net.Dialer{Timeout: 10 * time.Second}
+
+// webDialFn is the last hop, kept replaceable so the address-selection logic can be tested
+// without a live host: the rule under test is which address gets tried, not what TCP does.
+var webDialFn = func(ctx context.Context, network string, ip net.IP, port string) (net.Conn, error) {
+	return webDialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+}
+
+// dialCandidates keeps the public addresses, in resolver order.
+func dialCandidates(ips []net.IPAddr) []net.IP {
+	var out []net.IP
+	for _, cand := range ips {
+		if !isBlockedIP(cand.IP) {
+			out = append(out, cand.IP)
+		}
+	}
+	return out
+}
+
+// dialRace tries every address, starting the next after dialFallbackDelay, and returns the
+// first connection. The guard has already run, so every address here is allowed; this is
+// about which one answers, not whether it may be contacted.
+func dialRace(ctx context.Context, addrs []net.IP, dial func(context.Context, net.IP) (net.Conn, error)) (net.Conn, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result, len(addrs))
+	for i, ip := range addrs {
+		if i > 0 {
+			// Stagger the starts: the point is to have a second chance ready, not to open
+			// every address at once.
+			select {
+			case <-ctx.Done():
+				break
+			case <-time.After(dialFallbackDelay):
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		go func(ip net.IP) {
+			conn, err := dial(ctx, ip)
+			select {
+			case results <- result{conn, err}:
+			case <-ctx.Done():
+				if conn != nil {
+					conn.Close()
+				}
+			}
+		}(ip)
+	}
+
+	var firstErr error
+	for range addrs {
+		select {
+		case <-ctx.Done():
+			if firstErr != nil {
+				return nil, firstErr
+			}
+			return nil, ctx.Err()
+		case r := <-results:
+			if r.err == nil && r.conn != nil {
+				// Whoever won, the rest must not keep trying: their sockets would leak.
+				cancel()
+				return r.conn, nil
+			}
+			if firstErr == nil && r.err != nil {
+				firstErr = r.err
+			}
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no address answered")
+	}
+	return nil, firstErr
+}
 
 // guardURL rejects anything that is not plain http(s) on a public address.
 func guardURL(u *url.URL) error {
