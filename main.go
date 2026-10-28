@@ -20,7 +20,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.15.0"
+const Version = "1.16.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -68,6 +68,9 @@ type Provider struct {
 	// before anything else and only a failure moves the request on. Used for a
 	// spare account whose whole purpose is to absorb traffic until it breaks.
 	First bool
+	// Web marks a provider whose vendor exposes web search and fetch endpoints.
+	// The router forwards those calls here instead of doing the work itself.
+	Web bool
 }
 
 // conversationID derives a stable identifier for the conversation a request
@@ -134,6 +137,7 @@ func defaultProviders() map[string]*Provider {
 				"clef":   {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
 			},
 			KeyEnv: "OLLAMA_API_KEY",
+			Web:    true,
 		},
 		// A second ollama.com account, spent first on purpose: the owner treats it as
 		// expendable, so it runs ahead of the peak and price order until it errors and
@@ -151,6 +155,7 @@ func defaultProviders() map[string]*Provider {
 			},
 			KeyEnv: "OLLAMA_LENJAN_API_KEY",
 			First:  true,
+			Web:    true,
 		},
 		"nous": {
 			Base: "https://inference-api.nousresearch.com/v1",

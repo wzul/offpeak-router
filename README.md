@@ -359,6 +359,21 @@ b3: <32 hex>-<16 hex>-1-<16 hex>
 Accept-Encoding: gzip, deflate, br, zstd
 ```
 
+### Web search and fetch are forwarded, not performed
+
+ollama.com serves `/api/web_search` and `/api/web_fetch`, and this router used to reproduce both
+locally: a DuckDuckGo scrape and its own fetcher, from this host's egress. That duplicated a
+vendor feature and inherited every problem of the host doing the work — an SSRF guard to
+maintain, no browser, and, on a box whose IPv6 resolves but does not route, a 10-second timeout
+for every IPv6-capable site.
+
+Both calls now go to the account that owns them, in the same order as chat: the pinned account
+first, then the rest, skipping any provider whose breaker is open, because the credential is
+shared. `X-Router-Backend` names whoever answered (`ollama:ollama-lenjan`, `ollama:ollama`). The
+local implementation stays as the fallback and reports `local` when it runs, so a web call is
+never failed just because the accounts could not serve it at that moment. A failure on these
+routes counts against the account, so an unpaid bill parks web and chat together.
+
 ### Held out, not retried every minute
 
 A 60-second cooldown suits a hiccup and misfits an unpaid bill. Failures are therefore split
