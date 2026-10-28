@@ -174,3 +174,89 @@ func TestGemma4RoutingAndCapabilities(t *testing.T) {
 		t.Errorf("api = %q, want chat", api)
 	}
 }
+
+// Tool calling is advertised because it was measured: every upstream below was asked
+// directly with a tool definition and answered with tool_calls. A client that reads this
+// flag and sends tools must not discover the gap at request time.
+func TestToolsCapabilityIsPublished(t *testing.T) {
+	for _, model := range []string{"deepseek-v4.1-flash", "gemma4"} {
+		found := false
+		for _, c := range capabilitiesFor(model) {
+			if c == "tools" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s does not advertise tools: %v", model, capabilitiesFor(model))
+		}
+		providers := capabilityProvidersFor(model)["tools"]
+		if len(providers) == 0 {
+			t.Errorf("%s advertises tools with no verified upstream", model)
+		}
+	}
+	// Clef is a decision schema, not a chat completion: claiming tools there would invite
+	// a request the upstream cannot interpret.
+	for _, c := range capabilitiesFor("clef") {
+		if c == "tools" {
+			t.Error("clef advertises tools")
+		}
+	}
+}
+
+// Every provider named against a capability must actually serve that model. A stale name
+// here is worse than a missing one: it tells a client to route somewhere that cannot answer.
+func TestVerifiedProvidersServeTheModel(t *testing.T) {
+	for model, caps := range capabilityProviders {
+		for capability, providers := range caps {
+			for _, name := range providers {
+				p, ok := provs[name]
+				if !ok {
+					t.Errorf("%s/%s names unknown provider %q", model, capability, name)
+					continue
+				}
+				if _, served := p.Models[model]; !served {
+					t.Errorf("%s/%s names %q, which does not serve %s", model, capability, name, model)
+				}
+			}
+		}
+	}
+}
+
+// The claim must reach clients, not just live in a map.
+func TestModelsRouteExposesToolCapability(t *testing.T) {
+	router := httptest.NewServer(newMux())
+	t.Cleanup(router.Close)
+	resp, raw := postAnthropic(t, router.URL, "/v1/models", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, raw)
+	}
+	var got struct {
+		Data []struct {
+			ID                  string              `json:"id"`
+			Capabilities        []string            `json:"capabilities"`
+			CapabilityProviders map[string][]string `json:"capability_providers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, m := range got.Data {
+		if m.ID != "deepseek-v4.1-flash" {
+			continue
+		}
+		hasTools := false
+		for _, c := range m.Capabilities {
+			if c == "tools" {
+				hasTools = true
+			}
+		}
+		if !hasTools {
+			t.Fatalf("capabilities = %v, want tools", m.Capabilities)
+		}
+		if len(m.CapabilityProviders["tools"]) == 0 {
+			t.Errorf("capability_providers has no tools entry: %v", m.CapabilityProviders)
+		}
+		return
+	}
+	t.Fatal("deepseek-v4.1-flash missing from /v1/models")
+}

@@ -13,11 +13,12 @@ package main
 
 // modelCapabilities holds the verified capability set per canonical model id.
 var modelCapabilities = map[string][]string{
-	"deepseek-v4.1-flash": {"completion", "vision", "thinking"},
-	// gemma4:31b answered "Red" for a red PNG on ollama; go does not serve it at
-	// all, and no other upstream was verified.
-	"gemma4": {"completion", "vision"},
-	// Clef answers one decision schema; it is not a chat or a vision model.
+	"deepseek-v4.1-flash": {"completion", "vision", "thinking", "tools"},
+	// gemma4:31b answered "Red" for a red PNG on ollama, and called a tool with the
+	// right arguments on both ollama accounts; go does not serve it at all.
+	"gemma4": {"completion", "vision", "tools"},
+	// Clef answers one decision schema behind /v1/systemone; tool calling is not part
+	// of that shape, so it is not claimed here.
 	"clef": {"completion"},
 }
 
@@ -27,9 +28,13 @@ var capabilityProviders = map[string]map[string][]string{
 	"deepseek-v4.1-flash": {
 		"vision":   {"go", "ollama"},
 		"thinking": {"go", "ollama"},
+		// Every upstream was asked directly with a tool definition and answered with
+		// tool_calls carrying {"city": "Kuala Lumpur"}; nous is unverified, not unable.
+		"tools": {"go", "ollama", "ollama-lenjan"},
 	},
 	"gemma4": {
 		"vision": {"ollama"},
+		"tools":  {"ollama", "ollama-lenjan"},
 	},
 }
 
