@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -173,14 +174,13 @@ func routedSearch(ctx context.Context, q string, limit int) ([]webHit, string, e
 		return hits, "ollama:" + name, nil
 	}
 
-	hits, backend, err := localSearch(ctx, q, limit)
-	if err != nil {
-		if firstErr != nil {
-			return nil, backend, fmt.Errorf("upstream: %v; local: %w", firstErr, err)
-		}
-		return nil, backend, err
+	// No local fallback: the vendor owns this endpoint, and doing the work here would mean
+	// maintaining a scraper, a browser-less HTML pipeline and an SSRF guard to reproduce what
+	// the account already answers. A failed search is reported as a failed search.
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no provider served the search")
 	}
-	return hits, backend, nil
+	return nil, "", firstErr
 }
 
 // routedFetch forwards one page fetch to a web-capable provider, falling back to fetching it
@@ -192,6 +192,17 @@ func routedFetch(ctx context.Context, target string) fetchDoc {
 
 // routedFetchNamed is the same call, reporting who answered.
 func routedFetchNamed(ctx context.Context, target string) (fetchDoc, string) {
+	// Checked before any provider is asked, and outside the loop: a target this router refuses
+	// must be refused whether or not an account happens to be configured. Handing a caller's
+	// internal hostname to a third party is the same mistake as fetching it ourselves.
+	u, uerr := url.Parse(strings.TrimSpace(target))
+	if uerr != nil {
+		return fetchDoc{URL: target, Error: "invalid URL", Refused: true}, ""
+	}
+	if rerr := refuseTarget(u); rerr != nil {
+		return fetchDoc{URL: target, Error: rerr.Error(), Refused: true}, ""
+	}
+
 	var firstErr error
 	for _, name := range webUpstreamProviders() {
 		p := provs[name]
@@ -235,19 +246,11 @@ func routedFetchNamed(ctx context.Context, target string) (fetchDoc, string) {
 		}, "ollama:" + name
 	}
 
-	// Nothing upstream answered. A refused target is still refused here - the guard runs on
-	// the local path, and the vendor does not consult it for us.
-	doc := fetchOneFn(ctx, target)
-	if doc.Error != "" && firstErr != nil {
-		log.Printf("web fetch fell back to the local fetcher after: %v", firstErr)
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no provider served the fetch")
 	}
-	return doc, "local"
+	return fetchDoc{URL: target, Error: firstErr.Error()}, ""
 }
-
-// localSearch is the fallback scraper. A seam, so the fallback can be tested without the
-// network: the SSRF guard inside runSearch refuses loopback, and that guard is not a thing a
-// test should be allowed to relax.
-var localSearch = runSearch
 
 // webBackendLabel reports which path would serve a web call, for operators reading /status.
 func webBackendLabel() string {

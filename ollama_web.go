@@ -45,9 +45,6 @@ func handleOllamaWebSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if backend == "" {
-		backend = searchBackendName()
-	}
 	w.Header().Set("X-Router-Backend", backend)
 	writeJSON(w, 200, map[string]any{"results": ollamaSearchResults(hits)})
 }

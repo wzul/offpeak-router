@@ -87,11 +87,6 @@ func TestWebSearchGoesToThePinnedAccountFirst(t *testing.T) {
 	rig.server(t)
 	webRigProviders(t, rig.srv.URL)
 
-	// Make the local scraper fail loudly if it is ever used on this path.
-	prevDDG := ddgEndpoint
-	t.Cleanup(func() { ddgEndpoint = prevDDG })
-	ddgEndpoint = "http://127.0.0.1:1/"
-
 	hits, backend, err := routedSearch(context.Background(), "golang", 3)
 	if err != nil {
 		t.Fatalf("routedSearch: %v", err)
@@ -150,78 +145,6 @@ func TestHeldAccountIsSkippedForWeb(t *testing.T) {
 }
 
 // An empty document is not an answer: fall back rather than hand the caller a blank page.
-func TestEmptyUpstreamDocumentFallsBack(t *testing.T) {
-	rig := &webRig{empty: true}
-	rig.server(t)
-	webRigProviders(t, rig.srv.URL)
-
-	prevFetch := fetchOneFn
-	t.Cleanup(func() { fetchOneFn = prevFetch })
-	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
-		return fetchDoc{URL: target, Status: 200, Title: "lokal", Content: "isi dari host ini"}
-	}
-
-	doc, backend := routedFetchNamed(context.Background(), "https://example.com/a")
-	if backend != "local" {
-		t.Errorf("backend = %q, want the local fetcher", backend)
-	}
-	if doc.Content != "isi dari host ini" {
-		t.Errorf("doc = %+v", doc)
-	}
-}
-
-// If every account refuses, the call still gets answered.
-func TestWebFallsBackToLocalWhenEveryAccountFails(t *testing.T) {
-	rig := &webRig{fail: true}
-	rig.server(t)
-	webRigProviders(t, rig.srv.URL)
-
-	prevFetch := fetchOneFn
-	t.Cleanup(func() { fetchOneFn = prevFetch })
-	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
-		return fetchDoc{URL: target, Status: 200, Title: "lokal", Content: "isi dari host ini"}
-	}
-
-	doc, backend := routedFetchNamed(context.Background(), "https://example.com/a")
-	if backend != "local" {
-		t.Errorf("backend = %q", backend)
-	}
-	if doc.Content != "isi dari host ini" {
-		t.Errorf("fallback document = %+v", doc)
-	}
-	// The failure was about the account, so it must count against that account.
-	if !breakerOpen("ollama-lenjan") {
-		t.Error("a 402 from the web endpoint did not hold the account")
-	}
-}
-
-// When every account refuses the search too, the local scraper must answer rather than the
-// caller getting an error for a call the gateway can still serve.
-func TestWebSearchFallsBackToTheLocalScraper(t *testing.T) {
-	rig := &webRig{fail: true}
-	rig.server(t)
-	webRigProviders(t, rig.srv.URL)
-
-	prevLocal := localSearch
-	t.Cleanup(func() { localSearch = prevLocal })
-	localSearch = func(ctx context.Context, q string, limit int) ([]webHit, string, error) {
-		return []webHit{{Title: "Hasil Tempatan", URL: "https://example.com/lokal"}}, "duckduckgo", nil
-	}
-
-	hits, backend, err := routedSearch(context.Background(), "golang", 3)
-	if err != nil {
-		t.Fatalf("routedSearch: %v", err)
-	}
-	if backend != "duckduckgo" {
-		t.Errorf("backend = %q, want the local scraper", backend)
-	}
-	if len(hits) != 1 || hits[0].Title != "Hasil Tempatan" {
-		t.Errorf("hits = %+v", hits)
-	}
-}
-
-// A caller's bad URL must not count against the account. Otherwise a dozen typos open the
-// breaker on a healthy pair of accounts and the whole gateway stops serving.
 func TestBadURLDoesNotBlameTheAccount(t *testing.T) {
 	prev := provs
 	t.Cleanup(func() { provs = prev })
@@ -237,12 +160,6 @@ func TestBadURLDoesNotBlameTheAccount(t *testing.T) {
 	}
 	t.Setenv("SPARE_KEY", "spare-key")
 	breakers = map[string]*breakerEntry{}
-
-	prevFetch := fetchOneFn
-	t.Cleanup(func() { fetchOneFn = prevFetch })
-	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
-		return fetchDoc{URL: target, Refused: true, Error: "resolve: no such host"}
-	}
 
 	routedFetchNamed(context.Background(), "https://tiada.example/")
 

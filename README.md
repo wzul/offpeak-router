@@ -359,20 +359,24 @@ b3: <32 hex>-<16 hex>-1-<16 hex>
 Accept-Encoding: gzip, deflate, br, zstd
 ```
 
-### Web search and fetch are forwarded, not performed
+### Web search and fetch are forwarded, and nothing fetches here
 
-ollama.com serves `/api/web_search` and `/api/web_fetch`, and this router used to reproduce both
-locally: a DuckDuckGo scrape and its own fetcher, from this host's egress. That duplicated a
-vendor feature and inherited every problem of the host doing the work — an SSRF guard to
-maintain, no browser, and, on a box whose IPv6 resolves but does not route, a 10-second timeout
-for every IPv6-capable site.
+ollama.com serves `/api/web_search` and `/api/web_fetch`. This router used to reproduce both
+locally - a DuckDuckGo scrape and an HTTP fetcher of its own - which is a second implementation
+of a vendor feature, run from this host's egress, and it carried a cost that only showed up
+later: an SSRF guard and a dialer to maintain, no browser, and, on a box whose IPv6 resolves but
+does not route, a ten-second timeout on every IPv6-capable site.
 
-Both calls now go to the account that owns them, in the same order as chat: the pinned account
-first, then the rest, skipping any provider whose breaker is open, because the credential is
-shared. `X-Router-Backend` names whoever answered (`ollama:ollama-lenjan`, `ollama:ollama`). The
-local implementation stays as the fallback and reports `local` when it runs, so a web call is
-never failed just because the accounts could not serve it at that moment. A failure on these
-routes counts against the account, so an unpaid bill parks web and chat together.
+Both calls are now forwarded per provider in the same order as chat - pinned account first,
+then the rest, skipping any account whose breaker is open, because the credential is shared -
+and `X-Router-Backend` names whoever answered. There is no local fallback: if no account can
+serve the call, the call fails with the upstream's reason, because a gateway that silently does
+the work itself hides the outage it was supposed to report.
+
+One check stays local, on the target alone: `http(s)` only, and no internal literals or names
+(`localhost`, `*.local`, `*.internal`, RFC1918, loopback, link-local, CGNAT). Handing a caller's
+internal address to a third party is the same mistake as fetching it here - and the check costs
+no network call, so it cannot fail the way a dialer can.
 
 ### Held out, not retried every minute
 

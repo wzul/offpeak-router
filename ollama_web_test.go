@@ -6,10 +6,8 @@ package main
 // hard contracts, not cosmetics.
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 )
@@ -77,67 +75,6 @@ func TestOllamaWebFetchBodyShape(t *testing.T) {
 	}
 }
 
-func TestExtractLinksResolvesAndDedupes(t *testing.T) {
-	page := `<a href="/a">a</a><a href="b.html">b</a>` +
-		`<a href="https://other.example/x#frag">x</a>` +
-		`<a href="/a">a again</a><a href="mailto:x@y.z">mail</a><a href="#top">top</a>`
-	base, _ := url.Parse("https://site.example/dir/page")
-
-	got := extractLinks(page, base)
-	want := []string{
-		"https://site.example/a",
-		"https://site.example/dir/b.html",
-		"https://other.example/x",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("links = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("link %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-	for _, l := range got {
-		if strings.Contains(l, "#") {
-			t.Errorf("fragment kept in %q", l)
-		}
-		if strings.HasPrefix(l, "mailto:") {
-			t.Errorf("non-http scheme kept: %q", l)
-		}
-	}
-}
-
-// Assets are not links a reader can follow; handing back a font host or an
-// analytics beacon makes a model cite junk.
-func TestExtractLinksIgnoresNonAnchorHrefs(t *testing.T) {
-	page := `<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=x">` +
-		`<link rel="preload" href="https://www.googletagmanager.com/gtm.js">` +
-		`<script src="https://cdn.example/x.js"></script>` +
-		`<a href="https://real.example/page">real</a>`
-	base, _ := url.Parse("https://site.example/")
-
-	got := extractLinks(page, base)
-	if len(got) != 1 || got[0] != "https://real.example/page" {
-		t.Fatalf("links = %v, want only the anchor", got)
-	}
-}
-
-func TestExtractLinksCapsOutput(t *testing.T) {
-	var sb strings.Builder
-	for i := 0; i < maxLinks+25; i++ {
-		sb.WriteString(`<a href="/p`)
-		sb.WriteString(strings.Repeat("x", 1))
-		sb.WriteString(itoa(i))
-		sb.WriteString(`">l</a>`)
-	}
-	base, _ := url.Parse("https://site.example/")
-	if got := extractLinks(sb.String(), base); len(got) != maxLinks {
-		t.Errorf("links = %d, want the %d cap", len(got), maxLinks)
-	}
-}
-
-// The fetch guard must run on this route too: an Ollama-named path is still an
-// authenticated fetch on a host with internal services.
 func TestOllamaWebFetchRefusesInternal(t *testing.T) {
 	_, srv := newUpstream(t)
 	router := setup(t, srv)
@@ -198,30 +135,35 @@ func itoa(n int) string {
 // A network failure is not the caller's mistake: the host resolved and was allowed, and
 // nothing answered. Reporting 400 there tells a client to stop retrying a request that would
 // work on the next attempt, and hides a dead upstream behind a client error.
-func TestOllamaWebFetchReportsNetworkFailureAsUpstream(t *testing.T) {
+
+// A failure is reported as a failure, and a target this router will not forward is reported as
+// the caller's mistake. Since the fetch is performed by the account, "network failure" now
+// means the upstream refused or did not answer - the local fetch path no longer exists.
+func TestOllamaWebFetchReportsUpstreamFailure(t *testing.T) {
+	up := &webRig{fail: true}
+	up.server(t)
+
+	// setup() installs its own provider table, so the web accounts are installed after it,
+	// not before: order matters when two helpers both own the same global.
 	_, srv := newUpstream(t)
 	router := setup(t, srv)
-
-	prev := fetchOneFn
-	t.Cleanup(func() { fetchOneFn = prev })
-	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
-		return fetchDoc{URL: target, Error: "dial tcp 93.184.216.34:443: i/o timeout"}
-	}
+	webRigProviders(t, up.srv.URL)
 
 	resp, body := postJSON(t, router.URL+"/api/web_fetch", `{"url":"https://example.com/"}`)
 	if resp.StatusCode != 502 {
-		t.Fatalf("status = %d, want 502 for an unreachable host; body = %s", resp.StatusCode, body)
+		t.Fatalf("status = %d, want 502 when no account can fetch; body = %s", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), "i/o timeout") {
-		t.Errorf("the reason was dropped: %s", body)
+	if !strings.Contains(string(body), "402") && !strings.Contains(string(body), "payment") {
+		t.Errorf("the upstream reason was dropped: %s", body)
 	}
 
-	// A refused target stays a client error: the same route, a different verdict.
-	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
-		return fetchDoc{URL: target, Refused: true, Error: "refusing to fetch 127.0.0.1: non-public address"}
-	}
-	resp, _ = postJSON(t, router.URL+"/api/web_fetch", `{"url":"http://127.0.0.1:8788/status"}`)
+	// A refused target never reaches an account: 400, and no upstream call at all.
+	before := len(up.recorded())
+	resp, body = postJSON(t, router.URL+"/api/web_fetch", `{"url":"http://127.0.0.1:8788/status"}`)
 	if resp.StatusCode != 400 {
-		t.Errorf("status = %d, want 400 for a refused target", resp.StatusCode)
+		t.Errorf("status = %d, want 400 for a refused target; body = %s", resp.StatusCode, body)
+	}
+	if after := len(up.recorded()); after != before {
+		t.Errorf("a refused target was forwarded upstream (%d new calls)", after-before)
 	}
 }

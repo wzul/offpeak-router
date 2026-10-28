@@ -1,31 +1,27 @@
 package main
 
-// Web capabilities for the router: /v1/search and /v1/fetch.
+// The web routes. Search and fetch are forwarded to the provider that owns them - see
+// webupstream.go - so nothing here contacts the target.
 //
-// These exist so a caller can point its whole web layer at one endpoint and get
-// the same bearer auth and the same ledger as the model routes. The response
-// shapes follow the tool-provider contract the Hermes web tools already speak
-// ({success, data}), so a client can swap backends without a translator.
+// This file used to hold a DuckDuckGo scraper, an HTML-to-text converter, a link extractor and
+// an HTTP fetcher of its own. That was a second implementation of a vendor feature, run from
+// this host's egress, and the cost only showed up later: an SSRF guard and a dialer to
+// maintain, no browser to render anything, and - on a box that resolves IPv6 without routing
+// it - a ten-second timeout on every IPv6-capable site. A gateway that reimplements what it
+// fronts is not more capable, it is another thing that can be broken separately.
 //
-// Backends are chosen from what is configured: Brave when BRAVE_SEARCH_API_KEY is
-// present, otherwise DuckDuckGo's HTML endpoint, which needs no key.
+// One check stays here, on the target alone: a caller's internal hostname should not be handed
+// to a third party either, and refusing it costs no network call.
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const (
@@ -33,27 +29,25 @@ const (
 	maxSearchLimit     = 20
 	maxFetchURLs       = 5
 	maxFetchBytes      = 4 << 20
-	webUserAgent       = "Mozilla/5.0 (compatible; offpeak-router/1.2; +https://router.wanzul-hosting.com)"
-	searchTimeout      = 20 * time.Second
-	fetchTimeout       = 25 * time.Second
 )
 
+// Route counters, so /status can answer "is this route being used at all" for paths that leave
+// no other trace: a forwarded call is billed to the account, not to this process.
 var (
 	searchCalls atomic.Int64
 	fetchCalls  atomic.Int64
 )
 
-// ddgEndpoint is the DuckDuckGo HTML endpoint. A variable, not a literal, so a test can
-// serve it and a deployment can route searches through a proxy.
-var ddgEndpoint = "https://html.duckduckgo.com/html/"
-
+// webHit is one search result in this router's own shape (/v1/search).
 type webHit struct {
 	Title       string `json:"title"`
 	URL         string `json:"url"`
 	Description string `json:"description"`
-	Position    int    `json:"position"`
+	Position    int    `json:"position,omitempty"`
 }
 
+// fetchDoc is one fetched page. Refused marks a target this router will not even forward;
+// everything else that can go wrong is the upstream's answer.
 type fetchDoc struct {
 	URL     string   `json:"url"`
 	Title   string   `json:"title"`
@@ -61,265 +55,12 @@ type fetchDoc struct {
 	Status  int      `json:"status"`
 	Links   []string `json:"links,omitempty"`
 	Error   string   `json:"error,omitempty"`
-	// Refused marks a target this router would not contact at all. That is the caller's
-	// mistake, not an upstream fault, and the two need different status codes: retrying a
-	// blocked address will never work, while an upstream timeout might.
+	// Refused is not serialised: callers act on the status code, and a field naming our own
+	// policy invites a client to depend on it.
 	Refused bool `json:"-"`
 }
 
-// webClient never follows a redirect into private space: the router sits on a
-// host with internal services, so an unfiltered fetch route is an SSRF pivot.
-func newWebClient() *http.Client {
-	return &http.Client{
-		Timeout: fetchTimeout,
-		// Validate at connection time, not just before the request: a hostname
-		// that re-resolves between the check and the dial would otherwise slip
-		// through (DNS rebinding). The dialed address is the one that was checked.
-		Transport: &http.Transport{
-			Proxy:                 nil, // an environment proxy would bypass the guard
-			DialContext:           safeDialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second,
-			MaxIdleConns:          4,
-			IdleConnTimeout:       30 * time.Second,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			return guardURL(req.URL)
-		},
-	}
-}
-
-var webClient = newWebClient()
-
-// localNets holds every subnet this machine can reach without leaving the box -
-// docker bridges included. RFC1918 alone is not enough: docker hands out ranges
-// like 172.80.0.0/16, which is public address space and passes IsPrivate().
-var (
-	localNetsMu sync.RWMutex
-	localNets   []*net.IPNet
-	localNetsAt time.Time
-	localNetTTL = 5 * time.Minute
-)
-
-func refreshLocalNets() {
-	localNetsMu.RLock()
-	fresh := time.Since(localNetsAt) < localNetTTL && localNets != nil
-	localNetsMu.RUnlock()
-	if fresh {
-		return
-	}
-	var nets []*net.IPNet
-	ifaces, err := net.Interfaces()
-	if err == nil {
-		for _, iface := range ifaces {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, a := range addrs {
-				if n, ok := a.(*net.IPNet); ok {
-					nets = append(nets, &net.IPNet{IP: n.IP.Mask(n.Mask), Mask: n.Mask})
-				}
-			}
-		}
-	}
-	localNetsMu.Lock()
-	localNets, localNetsAt = nets, time.Now()
-	localNetsMu.Unlock()
-}
-
-func inLocalNet(ip net.IP) bool {
-	refreshLocalNets()
-	localNetsMu.RLock()
-	defer localNetsMu.RUnlock()
-	for _, n := range localNets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// safeDialContext resolves once, refuses non-public results, then dials the
-// checked IP itself so the name cannot resolve differently a moment later.
-// safeDialContext resolves the host, drops anything non-public, and then tries every
-// remaining address - staggered, not just the first one.
-//
-// Picking ips[0] looked harmless and was not: the resolver returns addresses in RFC 6724
-// order, which puts IPv6 first, so on a host that advertises an IPv6 address and a default
-// route that does not actually route, every fetch of an IPv6-capable site died on
-// "dial tcp [2001:...]: i/o timeout". Search kept working because the search endpoint
-// happens to answer over IPv4, which is exactly the kind of half-broken that goes unnoticed.
-func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := lookupIPAddrs(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("resolve %s: no addresses", host)
-	}
-	addrs := dialCandidates(ips)
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("refusing to fetch %s: resolves to a non-public address", host)
-	}
-	conn, dialErr := dialRace(ctx, addrs, func(ctx context.Context, ip net.IP) (net.Conn, error) {
-		return webDialFn(ctx, network, ip, port)
-	})
-	if dialErr != nil {
-		return nil, dialErr
-	}
-	return conn, nil
-}
-
-// dialFallbackDelay is how long the first address gets before the next one is tried as
-// well. Long enough that a working first choice normally wins outright, short enough that a
-// dead family costs a fraction of a second rather than the whole timeout.
-const dialFallbackDelay = 250 * time.Millisecond
-
-// lookupIPAddrs is a variable so a test can hand the dialer a known address list instead of
-// talking to DNS.
-var lookupIPAddrs = net.DefaultResolver.LookupIPAddr
-
-var webDialer = &net.Dialer{Timeout: 10 * time.Second}
-
-// webDialFn is the last hop, kept replaceable so the address-selection logic can be tested
-// without a live host: the rule under test is which address gets tried, not what TCP does.
-var webDialFn = func(ctx context.Context, network string, ip net.IP, port string) (net.Conn, error) {
-	return webDialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-}
-
-// dialCandidates keeps the public addresses, in resolver order.
-func dialCandidates(ips []net.IPAddr) []net.IP {
-	var out []net.IP
-	for _, cand := range ips {
-		if !isBlockedIP(cand.IP) {
-			out = append(out, cand.IP)
-		}
-	}
-	return out
-}
-
-// dialRace tries every address, starting the next after dialFallbackDelay, and returns the
-// first connection. The guard has already run, so every address here is allowed; this is
-// about which one answers, not whether it may be contacted.
-func dialRace(ctx context.Context, addrs []net.IP, dial func(context.Context, net.IP) (net.Conn, error)) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type result struct {
-		conn net.Conn
-		err  error
-	}
-	results := make(chan result, len(addrs))
-	for i, ip := range addrs {
-		if i > 0 {
-			// Stagger the starts: the point is to have a second chance ready, not to open
-			// every address at once.
-			select {
-			case <-ctx.Done():
-				break
-			case <-time.After(dialFallbackDelay):
-			}
-			if ctx.Err() != nil {
-				break
-			}
-		}
-		go func(ip net.IP) {
-			conn, err := dial(ctx, ip)
-			select {
-			case results <- result{conn, err}:
-			case <-ctx.Done():
-				if conn != nil {
-					conn.Close()
-				}
-			}
-		}(ip)
-	}
-
-	var firstErr error
-	for range addrs {
-		select {
-		case <-ctx.Done():
-			if firstErr != nil {
-				return nil, firstErr
-			}
-			return nil, ctx.Err()
-		case r := <-results:
-			if r.err == nil && r.conn != nil {
-				// Whoever won, the rest must not keep trying: their sockets would leak.
-				cancel()
-				return r.conn, nil
-			}
-			if firstErr == nil && r.err != nil {
-				firstErr = r.err
-			}
-		}
-	}
-	if firstErr == nil {
-		firstErr = fmt.Errorf("no address answered")
-	}
-	return nil, firstErr
-}
-
-// guardURL rejects anything that is not plain http(s) on a public address.
-func guardURL(u *url.URL) error {
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("missing host")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if isBlockedIP(ip) {
-			return fmt.Errorf("refusing to fetch %s: non-public address", host)
-		}
-		return nil
-	}
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("resolve %s: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return fmt.Errorf("resolve %s: no addresses", host)
-	}
-	for _, ip := range ips {
-		if isBlockedIP(ip) {
-			return fmt.Errorf("refusing to fetch %s: resolves to a non-public address", host)
-		}
-	}
-	return nil
-}
-
-func isBlockedIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	// Carrier-grade NAT and the IPv4 metadata service.
-	if v4 := ip.To4(); v4 != nil {
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return true
-		}
-		if v4[0] == 169 && v4[1] == 254 {
-			return true
-		}
-	}
-	// Anything on a subnet this host itself sits on - docker bridges such as
-	// 172.80.0.1 are outside RFC1918 and would otherwise be fair game.
-	return inLocalNet(ip)
-}
-
+// handleSearch serves GET /v1/search?q= and POST /v1/search {query,limit}.
 func handleSearch(w http.ResponseWriter, r *http.Request) {
 	q, limit := "", defaultSearchLimit
 	switch r.Method {
@@ -377,159 +118,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"success": true, "query": q, "data": map[string]any{"web": hits}})
 }
 
-// runSearch tries the configured backends in order and reports which answered.
-func runSearch(ctx context.Context, q string, limit int) ([]webHit, string, error) {
-	if key := os.Getenv("BRAVE_SEARCH_API_KEY"); key != "" {
-		hits, err := braveSearch(ctx, key, q, limit)
-		if err == nil && len(hits) > 0 {
-			return hits, "brave", nil
-		}
-	}
-	hits, err := ddgSearch(ctx, q, limit)
-	if err != nil {
-		return nil, "duckduckgo", err
-	}
-	if len(hits) == 0 {
-		return nil, "duckduckgo", errors.New("search returned no results")
-	}
-	return hits, "duckduckgo", nil
-}
-
-func braveSearch(ctx context.Context, key, q string, limit int) ([]webHit, error) {
-	u := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) +
-		fmt.Sprintf("&count=%d", limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Subscription-Token", key)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", webUserAgent)
-
-	resp, err := webClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("brave: status %d", resp.StatusCode)
-	}
-	var out struct {
-		Web struct {
-			Results []struct {
-				Title       string `json:"title"`
-				URL         string `json:"url"`
-				Description string `json:"description"`
-			} `json:"results"`
-		} `json:"web"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return nil, err
-	}
-	hits := make([]webHit, 0, len(out.Web.Results))
-	for i, r := range out.Web.Results {
-		if i >= limit {
-			break
-		}
-		hits = append(hits, webHit{
-			Title:       html.UnescapeString(stripTags(r.Title)),
-			URL:         r.URL,
-			Description: html.UnescapeString(stripTags(r.Description)),
-			Position:    i + 1,
-		})
-	}
-	return hits, nil
-}
-
-var (
-	// DuckDuckGo's HTML endpoint has kept these class names for years, but the
-	// attribute order varies, so match the class anywhere in the tag.
-	ddgResultRe  = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>`)
-	ddgSnippetRe = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>`)
-	tagRe        = regexp.MustCompile(`(?s)<[^>]*>`)
-	spaceRe      = regexp.MustCompile(`\s+`)
-)
-
-func ddgSearch(ctx context.Context, q string, limit int) ([]webHit, error) {
-	form := url.Values{"q": {q}, "kl": {"wt-wt"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		ddgEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", webUserAgent)
-	req.Header.Set("Accept", "text/html")
-
-	resp, err := webClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("duckduckgo: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("duckduckgo: status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, err
-	}
-	return parseDDG(string(body), limit), nil
-}
-
-func parseDDG(page string, limit int) []webHit {
-	links := ddgResultRe.FindAllStringSubmatch(page, -1)
-	snips := ddgSnippetRe.FindAllStringSubmatch(page, -1)
-	hits := make([]webHit, 0, len(links))
-	seen := map[string]bool{}
-	for i, m := range links {
-		raw := html.UnescapeString(m[1])
-		target := ddgTarget(raw)
-		if target == "" || seen[target] {
-			continue
-		}
-		desc := ""
-		if i < len(snips) {
-			desc = cleanText(snips[i][1])
-		}
-		seen[target] = true
-		hits = append(hits, webHit{
-			Title:       cleanText(m[2]),
-			URL:         target,
-			Description: desc,
-			Position:    len(hits) + 1,
-		})
-		if len(hits) >= limit {
-			break
-		}
-	}
-	return hits
-}
-
-// ddgTarget unwraps DuckDuckGo's /l/?uddg=<encoded> redirect wrapper.
-func ddgTarget(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "//") {
-		raw = "https:" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if target := u.Query().Get("uddg"); target != "" {
-		if decoded, err := url.QueryUnescape(target); err == nil {
-			return decoded
-		}
-		return target
-	}
-	if u.Scheme == "http" || u.Scheme == "https" {
-		return u.String()
-	}
-	return ""
-}
-
+// handleFetch serves GET /v1/fetch?url= and POST /v1/fetch {url|urls}.
 func handleFetch(w http.ResponseWriter, r *http.Request) {
 	var targets []string
 	switch r.Method {
@@ -569,7 +158,6 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	failed := 0
 	for _, t := range targets {
 		doc := routedFetch(r.Context(), t)
-		_ = fetchOneFn
 		if doc.Error != "" {
 			failed++
 		}
@@ -577,11 +165,10 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	fetchCalls.Add(1)
 
-	// A failed fetch is not a successful response carrying empty strings. Reporting 200 with
-	// success:true here made a dead URL indistinguishable from a blank page, so a caller that
-	// only reads the status code - which is what every HTTP client does first - treated the
-	// failure as content, and the real cause stayed buried in a field nobody checked.
-	status := 200
+	// A failed fetch is not a successful response carrying empty strings. Every HTTP client
+	// reads the status first; a 200 here means the caller keeps an empty document and never
+	// learns why.
+	status := http.StatusOK
 	success := true
 	if failed > 0 {
 		success = false
@@ -592,7 +179,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadGateway
 		for _, d := range docs {
 			if d.Refused {
-				// A target this router will never fetch is a request error: repeating it is
+				// A target this router will never forward is a request error: repeating it is
 				// pointless, and 502 would invite a retry.
 				status = http.StatusBadRequest
 				break
@@ -606,145 +193,49 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, body)
 }
 
-// fetchOneFn is what the routes call; fetchOne is the implementation. A seam, so a route
-// test does not need the network - the SSRF guard inside fetchOne stays exactly as it is.
-var fetchOneFn = func(ctx context.Context, target string) fetchDoc { return fetchOne(ctx, target) }
-
-func fetchOne(ctx context.Context, target string) fetchDoc {
-	doc := fetchDoc{URL: target}
-	u, err := url.Parse(strings.TrimSpace(target))
-	if err != nil {
-		doc.Error = "invalid URL"
-		doc.Refused = true
-		return doc
+// refuseTarget rejects a target this router will not forward. It looks only at the URL and at
+// an IP literal in the host: no DNS, no dialer. Resolving to decide would put this process back
+// in the business of connecting, and the upstream is the one that has to fetch anyway.
+func refuseTarget(u *url.URL) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
 	}
-	if err := guardURL(u); err != nil {
-		doc.Error = err.Error()
-		doc.Refused = true
-		return doc
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing host")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		doc.Error = err.Error()
-		return doc
+	if ip := net.ParseIP(host); ip != nil {
+		if isInternalIP(ip) {
+			return fmt.Errorf("refusing to fetch %s: non-public address", host)
+		}
+		return nil
 	}
-	req.Header.Set("User-Agent", webUserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5")
-
-	resp, err := webClient.Do(req)
-	if err != nil {
-		doc.Error = err.Error()
-		return doc
+	lower := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") ||
+		strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".internal") {
+		return fmt.Errorf("refusing to fetch %s: non-public address", host)
 	}
-	defer resp.Body.Close()
-	doc.Status = resp.StatusCode
-
-	ct := resp.Header.Get("Content-Type")
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes))
-	if err != nil {
-		doc.Error = "read body: " + err.Error()
-		return doc
-	}
-	if strings.Contains(ct, "html") || (ct == "" && strings.Contains(string(raw[:min(512, len(raw))]), "<")) {
-		doc.Title, doc.Content = htmlToText(string(raw))
-		doc.Links = extractLinks(string(raw), u)
-	} else {
-		doc.Content = strings.TrimSpace(string(raw))
-	}
-	if resp.StatusCode >= 400 {
-		doc.Error = fmt.Sprintf("upstream status %d", resp.StatusCode)
-	}
-	return doc
+	return nil
 }
 
-// htmlToText pulls the title and readable text out of a page without pulling in
-// an HTML parser: drop non-content elements, turn block boundaries into breaks,
-// strip the remaining tags, unescape entities, then collapse whitespace.
-func htmlToText(page string) (title, text string) {
-	if m := regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`).FindStringSubmatch(page); len(m) == 2 {
-		title = cleanText(m[1])
+// isInternalIP reports whether an address literal is one a caller has no business asking a
+// third party to fetch.
+func isInternalIP(ip net.IP) bool {
+	if ip == nil {
+		return true
 	}
-	s := page
-	for _, re := range []*regexp.Regexp{
-		regexp.MustCompile(`(?is)<!--.*?-->`),
-		regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`),
-		regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`),
-		regexp.MustCompile(`(?is)<noscript[^>]*>.*?</noscript>`),
-		regexp.MustCompile(`(?is)<svg[^>]*>.*?</svg>`),
-		regexp.MustCompile(`(?is)<head[^>]*>.*?</head>`),
-	} {
-		s = re.ReplaceAllString(s, " ")
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
 	}
-	// Block-level tags become line breaks so paragraphs stay distinguishable.
-	s = regexp.MustCompile(`(?i)</?(p|div|section|article|header|footer|li|tr|h[1-6]|br|pre|blockquote)\b[^>]*>`).
-		ReplaceAllString(s, "\n")
-	s = tagRe.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
-	lines := strings.Split(s, "\n")
-	out := make([]string, 0, len(lines))
-	for _, ln := range lines {
-		if ln = strings.Join(strings.Fields(ln), " "); ln != "" {
-			out = append(out, ln)
+	// Carrier-grade NAT, and the IPv4 link-local metadata range.
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		if v4[0] == 169 && v4[1] == 254 {
+			return true
 		}
 	}
-	return title, strings.Join(out, "\n")
-}
-
-// maxLinks caps the links a page can report: a large site's nav would otherwise
-// bury the content a caller asked for.
-const maxLinks = 100
-
-// Anchors only: a bare href attribute also matches <link rel="stylesheet">, so a
-// page's font and analytics hosts would arrive as "links" a model may then cite.
-// The capture must include a fragment, or the closing quote stops matching and
-// the whole anchor is skipped.
-var hrefRe = regexp.MustCompile(`(?is)<a\b[^>]*?href\s*=\s*["']([^"']+)["']`)
-
-// extractLinks pulls the page's anchors out as absolute http(s) URLs, in document
-// order, without duplicates. Relative hrefs resolve against the page they came
-// from, which is how a reader would follow them.
-func extractLinks(page string, base *url.URL) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, m := range hrefRe.FindAllStringSubmatch(page, -1) {
-		raw := strings.TrimSpace(m[1])
-		// A bare fragment is a link to the page you are already on; it is never
-		// a reference worth handing back.
-		if raw == "" || strings.HasPrefix(raw, "#") {
-			continue
-		}
-		ref, err := url.Parse(raw)
-		if err != nil {
-			continue
-		}
-		abs := base.ResolveReference(ref)
-		if abs.Scheme != "http" && abs.Scheme != "https" {
-			continue
-		}
-		abs.Fragment = ""
-		key := abs.String()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, key)
-		if len(out) >= maxLinks {
-			break
-		}
-	}
-	return out
-}
-
-func stripTags(s string) string { return strings.TrimSpace(tagRe.ReplaceAllString(s, "")) }
-
-// searchBackendName reports which backend a search would use right now.
-func searchBackendName() string {
-	if os.Getenv("BRAVE_SEARCH_API_KEY") != "" {
-		return "brave"
-	}
-	return "duckduckgo"
-}
-
-func cleanText(s string) string {
-	return strings.TrimSpace(spaceRe.ReplaceAllString(html.UnescapeString(tagRe.ReplaceAllString(s, " ")), " "))
+	return false
 }

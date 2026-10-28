@@ -256,3 +256,57 @@ func TestStatusShowsTheHold(t *testing.T) {
 		t.Errorf("next probe is not visible: %v", entry)
 	}
 }
+
+// Every dialect must classify a dead account the same way. A bill does not become a hiccup
+// because the client chose the Anthropic or the Ollama route, and a per-dialect difference here
+// means one client retries a dead account every minute while the others have moved on.
+func TestBillingFailureHoldsOnEveryDialect(t *testing.T) {
+	oldBreakers, oldNow, oldProvs := breakers, nowFn, provs
+	t.Cleanup(func() { breakers, nowFn, provs = oldBreakers, oldNow, oldProvs })
+
+	up := &twoUpstreams{hits: map[string]int{}, status: 402,
+		body: `{"error":"your subscription payment is past due"}`}
+	srv := up.server(t)
+	t.Cleanup(srv.Close)
+
+	provs = map[string]*Provider{
+		"ollama-lenjan": {Base: srv.URL + "/spare", KeyEnv: "SPARE_KEY", First: true, Web: true,
+			Models: map[string]ModelRoute{"m": {ID: "spare-id"}}},
+		"ollama": {Base: srv.URL + "/main", KeyEnv: "MAIN_KEY", Web: true,
+			Models: map[string]ModelRoute{"m": {ID: "main-id"}}},
+	}
+	t.Setenv("SPARE_KEY", "k1")
+	t.Setenv("MAIN_KEY", "k2")
+	led = NewLedger(t.TempDir() + "/spend.json")
+	shadow = false
+	authToken = ""
+	nowFn = func() time.Time { return mon(13) }
+
+	router := httptest.NewServer(newMux())
+	t.Cleanup(router.Close)
+
+	dialects := []struct{ name, path, body string }{
+		{"openai", "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`},
+		{"anthropic", "/v1/messages", `{"model":"m","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`},
+		{"ollama", "/api/chat", `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":false}`},
+	}
+	for _, d := range dialects {
+		breakers = map[string]*breakerEntry{}
+		resp, raw := postAnthropic(t, router.URL, d.path, d.body)
+		if resp.StatusCode < 400 {
+			t.Errorf("%s: status = %d, want a failure; body = %s", d.name, resp.StatusCode, raw)
+		}
+		brMu.Lock()
+		entry := breakers["ollama-lenjan"]
+		brMu.Unlock()
+		if entry == nil || !entry.held {
+			t.Errorf("%s: a billing failure did not hold the account (entry = %+v)", d.name, entry)
+		}
+		// And it must be out well past the transient window.
+		nowFn = func() time.Time { return mon(13).Add(2 * time.Hour) }
+		if !breakerOpen("ollama-lenjan") {
+			t.Errorf("%s: the hold expired after two hours", d.name)
+		}
+		nowFn = func() time.Time { return mon(13) }
+	}
+}

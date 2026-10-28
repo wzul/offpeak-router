@@ -60,7 +60,7 @@ func serveOllama(w http.ResponseWriter, r *http.Request, payload map[string]any,
 			return
 		} else {
 			log.Printf("provider %s failed (ollama/%s): %v", name, kind, err)
-			breakerFail(name)
+			breakerFailWith(name, err)
 			anyFailover = true
 			attempts = append(attempts, map[string]string{"provider": name, "error": err.Error()})
 		}

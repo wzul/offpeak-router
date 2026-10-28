@@ -20,7 +20,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.16.4"
+const Version = "1.17.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -533,7 +533,6 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"web": map[string]any{
 			"search_calls":      searchCalls.Load(),
 			"fetch_calls":       fetchCalls.Load(),
-			"search_backend":    searchBackendName(),
 			"upstream_backends": webBackendLabel(),
 		},
 	})
@@ -850,8 +849,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode,
-			strings.TrimSpace(string(detail)))
+		return newUpstreamError(resp.StatusCode, string(detail))
 	}
 
 	w.Header().Set("X-Router-Provider", name)

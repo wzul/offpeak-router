@@ -131,6 +131,10 @@ type twoUpstreams struct {
 	mu     sync.Mutex
 	hits   map[string]int
 	broken string
+	// status, when set, is returned for every request regardless of account: used to prove
+	// how a whole class of upstream answer is classified per dialect.
+	status int
+	body   string
 }
 
 func (u *twoUpstreams) server(t *testing.T) *httptest.Server {
@@ -142,6 +146,15 @@ func (u *twoUpstreams) server(t *testing.T) *httptest.Server {
 		broken := name == u.broken
 		u.mu.Unlock()
 
+		if u.status != 0 {
+			w.WriteHeader(u.status)
+			body := u.body
+			if body == "" {
+				body = `{"error":"upstream refused"}`
+			}
+			fmt.Fprint(w, body)
+			return
+		}
 		if broken {
 			w.WriteHeader(502)
 			fmt.Fprint(w, `{"error":"quota exhausted"}`)
