@@ -6,6 +6,7 @@ package main
 // hard contracts, not cosmetics.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -192,4 +193,35 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// A network failure is not the caller's mistake: the host resolved and was allowed, and
+// nothing answered. Reporting 400 there tells a client to stop retrying a request that would
+// work on the next attempt, and hides a dead upstream behind a client error.
+func TestOllamaWebFetchReportsNetworkFailureAsUpstream(t *testing.T) {
+	_, srv := newUpstream(t)
+	router := setup(t, srv)
+
+	prev := fetchOneFn
+	t.Cleanup(func() { fetchOneFn = prev })
+	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
+		return fetchDoc{URL: target, Error: "dial tcp 93.184.216.34:443: i/o timeout"}
+	}
+
+	resp, body := postJSON(t, router.URL+"/api/web_fetch", `{"url":"https://example.com/"}`)
+	if resp.StatusCode != 502 {
+		t.Fatalf("status = %d, want 502 for an unreachable host; body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "i/o timeout") {
+		t.Errorf("the reason was dropped: %s", body)
+	}
+
+	// A refused target stays a client error: the same route, a different verdict.
+	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
+		return fetchDoc{URL: target, Refused: true, Error: "refusing to fetch 127.0.0.1: non-public address"}
+	}
+	resp, _ = postJSON(t, router.URL+"/api/web_fetch", `{"url":"http://127.0.0.1:8788/status"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 for a refused target", resp.StatusCode)
+	}
 }
