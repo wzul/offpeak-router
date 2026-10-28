@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,5 +217,87 @@ func TestWebSearchFallsBackToTheLocalScraper(t *testing.T) {
 	}
 	if len(hits) != 1 || hits[0].Title != "Hasil Tempatan" {
 		t.Errorf("hits = %+v", hits)
+	}
+}
+
+// A caller's bad URL must not count against the account. Otherwise a dozen typos open the
+// breaker on a healthy pair of accounts and the whole gateway stops serving.
+func TestBadURLDoesNotBlameTheAccount(t *testing.T) {
+	prev := provs
+	t.Cleanup(func() { provs = prev })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"error":"could not resolve that host"}`))
+	}))
+	t.Cleanup(srv.Close)
+	provs = map[string]*Provider{
+		"ollama-lenjan": {Base: srv.URL + "/v1", KeyEnv: "SPARE_KEY", First: true, Web: true,
+			Models: map[string]ModelRoute{"m": {ID: "m"}}},
+	}
+	t.Setenv("SPARE_KEY", "spare-key")
+	breakers = map[string]*breakerEntry{}
+
+	prevFetch := fetchOneFn
+	t.Cleanup(func() { fetchOneFn = prevFetch })
+	fetchOneFn = func(ctx context.Context, target string) fetchDoc {
+		return fetchDoc{URL: target, Refused: true, Error: "resolve: no such host"}
+	}
+
+	routedFetchNamed(context.Background(), "https://tiada.example/")
+
+	brMu.Lock()
+	entry := breakers["ollama-lenjan"]
+	brMu.Unlock()
+	if entry != nil && entry.fails > 0 {
+		t.Errorf("a 422 for a bad URL counted %d failure(s) against the account", entry.fails)
+	}
+
+	// The same route with a billing answer must still park the account.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(402)
+		w.Write([]byte(`{"error":"payment required"}`))
+	}))
+	t.Cleanup(srv2.Close)
+	provs["ollama-lenjan"] = &Provider{Base: srv2.URL + "/v1", KeyEnv: "SPARE_KEY", First: true,
+		Web: true, Models: map[string]ModelRoute{"m": {ID: "m"}}}
+	routedFetchNamed(context.Background(), "https://example.com/")
+	if !breakerOpen("ollama-lenjan") {
+		t.Error("a 402 on the web route did not hold the account")
+	}
+}
+
+// /status must say which path serves web calls, so an operator can tell forwarding from the
+// local fallback without reading the code.
+func TestStatusNamesTheWebBackends(t *testing.T) {
+	rig := &webRig{}
+	rig.server(t)
+	webRigProviders(t, rig.srv.URL)
+
+	router := httptest.NewServer(newMux())
+	t.Cleanup(router.Close)
+
+	resp, err := http.Get(router.URL + "/status")
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, raw)
+	}
+	var out struct {
+		Web struct {
+			Backends string `json:"upstream_backends"`
+		} `json:"web"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(out.Web.Backends, "ollama-lenjan") {
+		t.Errorf("upstream_backends = %q, want the web-capable accounts named", out.Web.Backends)
 	}
 }

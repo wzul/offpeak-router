@@ -20,7 +20,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.16.0"
+const Version = "1.16.1"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -531,9 +531,10 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"shadow":        shadow,
 		"breakers":      breakerSnapshot(),
 		"web": map[string]any{
-			"search_calls":   searchCalls.Load(),
-			"fetch_calls":    fetchCalls.Load(),
-			"search_backend": searchBackendName(),
+			"search_calls":      searchCalls.Load(),
+			"fetch_calls":       fetchCalls.Load(),
+			"search_backend":    searchBackendName(),
+			"upstream_backends": webBackendLabel(),
 		},
 	})
 }

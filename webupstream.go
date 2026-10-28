@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -81,6 +82,27 @@ func webRequest(ctx context.Context, name string, p *Provider, path string, body
 	return raw, nil
 }
 
+// accountBlame reports whether a web failure says something about the ACCOUNT. A malformed or
+// unreachable URL is the caller's problem: counting it would let a handful of bad URLs open the
+// breaker on healthy accounts, which is how a gateway parks itself for a caller's typo.
+func accountBlame(err error) bool {
+	var up *upstreamError
+	if !errors.As(err, &up) {
+		// Transport failure: no answer at all, which the account or the network could explain.
+		return true
+	}
+	switch {
+	case up.Status == http.StatusUnauthorized, up.Status == http.StatusPaymentRequired:
+		return true
+	case up.Status == http.StatusForbidden:
+		hold, _ := holdsIndefinitely(err)
+		return hold
+	case up.Status == http.StatusTooManyRequests, up.Status >= 500:
+		return true
+	}
+	return false
+}
+
 // routedSearch asks each web-capable provider in turn, then falls back to the local scraper.
 // The returned string names whoever answered, so a caller can see which path ran.
 func routedSearch(ctx context.Context, q string, limit int) ([]webHit, string, error) {
@@ -93,9 +115,11 @@ func routedSearch(ctx context.Context, q string, limit int) ([]webHit, string, e
 		raw, err := webRequest(ctx, name, p, "/api/web_search",
 			map[string]any{"query": q, "max_results": limit})
 		if err != nil {
-			// The credential and the account are shared with chat, so a failure here is
-			// evidence about the account, not only about this route.
-			breakerFailWith(name, err)
+			// The credential and the account are shared with chat, so an account-shaped
+			// failure here is evidence about the account - but only then.
+			if accountBlame(err) {
+				breakerFailWith(name, err)
+			}
 			log.Printf("web search via %s failed: %v", name, err)
 			if firstErr == nil {
 				firstErr = err
@@ -155,7 +179,9 @@ func routedFetchNamed(ctx context.Context, target string) (fetchDoc, string) {
 		}
 		raw, err := webRequest(ctx, name, p, "/api/web_fetch", map[string]any{"url": target})
 		if err != nil {
-			breakerFailWith(name, err)
+			if accountBlame(err) {
+				breakerFailWith(name, err)
+			}
 			log.Printf("web fetch via %s failed: %v", name, err)
 			if firstErr == nil {
 				firstErr = err
