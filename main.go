@@ -20,7 +20,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.17.0"
+const Version = "1.17.1"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost

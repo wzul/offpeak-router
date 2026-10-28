@@ -28,9 +28,12 @@ var capabilityProviders = map[string]map[string][]string{
 	"deepseek-v4.1-flash": {
 		"vision":   {"go", "ollama"},
 		"thinking": {"go", "ollama"},
-		// Every upstream was asked directly with a tool definition and answered with
-		// tool_calls carrying {"city": "Kuala Lumpur"}; nous is unverified, not unable.
-		"tools": {"go", "ollama", "ollama-lenjan"},
+		// Every upstream was asked, each on the host that holds its credential, and each
+		// answered with tool_calls carrying {"city": "Kuala Lumpur"}. nous was verified last,
+		// through the router with the other providers' keys unusable, so the request would
+		// reach it - a second process minting from the same refresh token would have tripped
+		// the portal's reuse detection and revoked the family.
+		"tools": {"go", "nous", "ollama", "ollama-lenjan"},
 	},
 	"gemma4": {
 		"vision": {"ollama"},
