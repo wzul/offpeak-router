@@ -17,8 +17,10 @@ import (
 type APIKey struct {
 	Label string
 	Token string
-	// MonthlyTokenLimit is reported by /v1/usage and enforced on chat routes
-	// when greater than zero. Zero means unlimited.
+	// MonthlyTokenLimit is a declared allowance. /v1/usage reports it next to
+	// what the key has actually spent this month so a caller can see the
+	// headroom; it is not enforced here, because cutting a client off mid-task
+	// is a decision the operator should make explicitly.
 	MonthlyTokenLimit int64
 }
 
