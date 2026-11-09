@@ -297,6 +297,41 @@ curl -s -X POST http://127.0.0.1:8788/api/web_fetch \
   not bury the content.
 - The `/v1/search` and `/v1/fetch` routes keep the gateway's own shape; these are additive.
 
+## Keys and per-key token usage
+
+`ROUTER_AUTH_TOKEN` is one token, so every client shares one identity and the
+usage answer is only ever "the router spent this much". Several keys fix that:
+
+```bash
+# label:token[:monthly_token_limit], comma separated
+export ROUTER_KEYS="opencode:$(openssl rand -hex 32),fleet:$(openssl rand -hex 32):5000000"
+```
+
+`ROUTER_AUTH_TOKEN` keeps working alongside them and is filed under
+`ROUTER_KEY_LABEL` (default `default`), so an existing deployment needs no
+client change to gain accounting.
+
+Token counts are kept per key per UTC day in `ROUTER_USAGE_DB` (default
+`usage.json` beside the ledger). Days older than `ROUTER_USAGE_RETENTION_DAYS`
+(default **60** — two months) are deleted on write, so the file does not grow
+without bound.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8788/v1/usage
+```
+
+```json
+{"as_of":"2026-11-09T22:41:00Z","retention_days":60,
+ "keys":[{"label":"fleet","monthly_token_limit":5000000,"days_kept":9,
+          "today":{"prompt":1200,"cache_read":300,"completion":410,"requests":7},
+          "month":{"prompt":90000,"cache_read":12000,"completion":30000,"requests":420}}],
+ "total_month":{"prompt":90000,"cache_read":12000,"completion":30000,"requests":420}}
+```
+
+`total` in a day is fresh input + cache reads + output, which is what a
+provider bills for. A key that has not been used yet but has a limit still
+appears, so an allowance is visible before its first request.
+
 ## Configuration
 
 Works out of the box with three providers of DeepSeek V4.1 Flash. For anything

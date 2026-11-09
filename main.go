@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,14 +12,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.17.1"
+const Version = "1.18.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -414,6 +415,13 @@ var (
 	led    *Ledger
 	provs  map[string]*Provider
 	shadow bool
+	// usageStore answers "which key spent these tokens", per day, and forgets
+	// days older than its retention window. Nil in tests that do not care.
+	usageStore *UsageStore
+	// tokenLimits holds the optional monthly token ceiling per key label.
+	// usageRetentionDays is how far back /v1/usage can look; older days are
+	// deleted on write rather than kept forever.
+	usageRetentionDays = defaultUsageRetentionDays
 	// authToken, when non-empty, is required as `Authorization: Bearer <token>`
 	// on every endpoint except /health. Empty disables auth entirely.
 	authToken string
@@ -436,9 +444,21 @@ var (
 )
 
 func record(provider, model string, u *usageBlock, now time.Time) float64 {
+	return recordFor("", provider, model, u, now)
+}
+
+// recordFor is record() with the key label attached, so the same call site
+// feeds both the spend ledger and the per-key token store.
+func recordFor(label, provider, model string, u *usageBlock, now time.Time) float64 {
 	in, cache, out := splitUsage(u)
 	cost := requestCost(provider, model, in, cache, out, isPeak(provider, now))
 	led.Add(now, provider, cost)
+	usageStore.Add(now, label, KeyUsage{
+		Prompt:     int64(in),
+		CacheRead:  int64(cache),
+		Completion: int64(out),
+		Requests:   1,
+	})
 	return cost
 }
 
@@ -448,46 +468,52 @@ func record(provider, model string, u *usageBlock, now time.Time) float64 {
 // supervisor can probe liveness without holding the credential.
 func withAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || authorized(r) {
+		if r.URL.Path == "/health" {
 			h(w, r)
+			return
+		}
+		label, ok := resolveKey(tokenFromRequest(r))
+		if ok {
+			// The label travels with the request so the recording paths can file
+			// the tokens under the key that caused them.
+			h(w, withLabel(r, label))
 			return
 		}
 		w.Header().Set("WWW-Authenticate", `Bearer realm="offpeak-router"`)
 		writeJSON(w, 401, map[string]any{"error": map[string]string{
-			"message": "unauthorized: send Authorization: Bearer <token>",
+			"message": "unauthorized: send Authorization: Bearer ***",
 			"type":    "invalid_request_error",
 		}})
 	}
 }
 
 func authorized(r *http.Request) bool {
-	if authToken == "" {
-		return true
-	}
-	// Two header shapes, one token. `Authorization: Bearer` is what OpenAI-shaped clients
-	// and Hermes send; `x-api-key` is what the Anthropic dialect specifies, and a client
-	// written against that dialect sends nothing else. Rejecting the second would mean
-	// telling every such client to reconfigure its auth - a compatibility gap dressed up
-	// as a security decision.
-	if key := r.Header.Get("x-api-key"); key != "" {
-		if subtle.ConstantTimeCompare([]byte(key), []byte(authToken)) == 1 {
-			return true
-		}
-	}
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) {
-		return false
-	}
-	// Constant time: a length leak here is a token oracle.
-	return subtle.ConstantTimeCompare(
-		[]byte(strings.TrimPrefix(h, prefix)), []byte(authToken)) == 1
+	_, ok := resolveKey(tokenFromRequest(r))
+	return ok
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleUsage reports the token totals each key has produced, for today and for
+// the current month, and states the retention window so a reader knows how far
+// back the numbers could possibly go.
+func handleUsage(w http.ResponseWriter, _ *http.Request) {
+	now := nowFn()
+	rows := usageStore.Snapshot(now)
+	var total KeyUsage
+	for _, r := range rows {
+		total.add(r.Month)
+	}
+	writeJSON(w, 200, map[string]any{
+		"as_of":          now.Format(time.RFC3339),
+		"retention_days": usageRetentionDays,
+		"keys":           rows,
+		"total_month":    total,
+	})
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -673,8 +699,18 @@ type systemOneUsage struct {
 
 // recordTokens bills a non-chat call, whose usage arrives as bare token counts.
 func recordTokens(provider, model string, in, out int, now time.Time) float64 {
+	return recordTokensFor("", provider, model, in, out, now)
+}
+
+// recordTokensFor is recordTokens() with the key label attached.
+func recordTokensFor(label, provider, model string, in, out int, now time.Time) float64 {
 	cost := requestCost(provider, model, float64(in), 0, float64(out), isPeak(provider, now))
 	led.Add(now, provider, cost)
+	usageStore.Add(now, label, KeyUsage{
+		Prompt:     int64(in),
+		Completion: int64(out),
+		Requests:   1,
+	})
 	return cost
 }
 
@@ -796,7 +832,7 @@ func forwardSystemOne(w http.ResponseWriter, r *http.Request, name string,
 		Usage systemOneUsage `json:"usage"`
 	}
 	_ = json.Unmarshal(raw, &env)
-	cost := recordTokens(name, model, env.Usage.PromptTokens, env.Usage.CompletionTokens, now)
+	cost := recordTokensFor(labelFromRequest(r), name, model, env.Usage.PromptTokens, env.Usage.CompletionTokens, now)
 
 	w.Header().Set("X-Router-Provider", name)
 	w.Header().Set("X-Router-Model", model)
@@ -862,7 +898,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 		}
 		var env usageEnvelope
 		_ = json.Unmarshal(raw, &env)
-		cost := record(name, model, env.Usage, now)
+		cost := recordFor(labelFromRequest(r), name, model, env.Usage, now)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Usd", fmt.Sprintf("%.6f", cost))
 		w.WriteHeader(200)
@@ -893,7 +929,7 @@ func forward(w http.ResponseWriter, r *http.Request, name string, p *Provider,
 			flusher.Flush()
 		}
 	}
-	record(name, model, captured, now)
+	recordFor(labelFromRequest(r), name, model, captured, now)
 	return nil
 }
 
@@ -911,6 +947,9 @@ func newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/messages", withAuth(handleMessages))
 	mux.HandleFunc("/v1/messages/count_tokens", withAuth(handleCountTokens))
 	mux.HandleFunc("/v1/systemone", withAuth(handleSystemOne))
+	// Per-key token accounting: which client spent what, and how much of its
+	// allowance is left. Auth-gated like every other data route.
+	mux.HandleFunc("/v1/usage", withAuth(handleUsage))
 	// Web layer: same bearer auth and the same ledger host as the model routes,
 	// so a client can point its whole web toolset here instead of a separate key.
 	mux.HandleFunc("/v1/search", withAuth(handleSearch))
@@ -960,11 +999,35 @@ func main() {
 	led = NewLedger(cfgLedger)
 
 	authToken = os.Getenv("ROUTER_AUTH_TOKEN")
-	if authToken != "" {
-		log.Printf("auth: bearer token required (set ROUTER_AUTH_TOKEN to change)")
+	if bad := loadKeys(); len(bad) > 0 {
+		for _, b := range bad {
+			log.Printf("keys: ignoring malformed entry %q (want label:token[:limit])", b)
+		}
+	}
+	if len(keys) > 0 {
+		labels := make([]string, 0, len(keys))
+		for _, k := range keys {
+			labels = append(labels, k.Label)
+		}
+		sort.Strings(labels)
+		log.Printf("auth: %d keys required (%s)", len(keys), strings.Join(labels, ", "))
 	} else {
 		log.Printf("auth: DISABLED — do not expose this listener publicly")
 	}
+
+	// Per-key token accounting lives beside the spend ledger unless told
+	// otherwise, and never outlives its retention window.
+	usagePath := os.Getenv("ROUTER_USAGE_DB")
+	if usagePath == "" {
+		usagePath = filepath.Join(filepath.Dir(cfgLedger), "usage.json")
+	}
+	if v := os.Getenv("ROUTER_USAGE_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			usageRetentionDays = n
+		}
+	}
+	usageStore = NewUsageStore(usagePath, usageRetentionDays)
+	log.Printf("usage: %s (%d-day retention)", usagePath, usageRetentionDays)
 
 	// The probe loop runs in this process: a held provider must be noticed even if no
 	// traffic arrives for hours, and a request must never be the thing that tests it.
