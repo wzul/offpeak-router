@@ -30,13 +30,17 @@ firewall to the container network only.
 
 ## Reverse proxy
 
-See `nginx.conf.example`. Two lines matter more than the rest:
+See `nginx.conf.example`. Three lines matter more than the rest:
 
 - **`proxy_buffering off`** — otherwise SSE is buffered until the completion
   finishes and streaming stops working.
 - **an ACME location** — nginx-proxy with `HTTPS_METHOD=nohttps` does not
   inject one, so `/.well-known/acme-challenge/` must be answered by your own
   server block or certificate issuance returns 404.
+- **`client_max_body_size`** — the 1 MB nginx default rejects any conversation
+  carrying tool output with `413 Request Entity Too Large`, which clients
+  surface as the provider refusing the prompt for being too long. Size it
+  above your largest context (`128m` is plenty).
 
 ## Gotchas that cost real time
 
@@ -59,6 +63,13 @@ See `nginx.conf.example`. Two lines matter more than the rest:
   `This Go model requires Global regions. Select Global in your workspace's Privacy settings`,
   which is a per-workspace switch in the OpenCode console, not anything the proxy
   can fix. Check it before debugging the request further.
+- **A "provider rejected the request as too long" can be a 413 from your own
+  proxy.** OpenCode phrases an oversized body that way (the full string is
+  `provider rejected the request as too long; compacting`), and the stored
+  error carries `status: 413` with an `nginx` HTML body. The router never logs
+  it and keeps reporting healthy, so check
+  `docker logs <proxy> | grep ' 413 '` and `client_max_body_size` before
+  blaming the model or the context window.
 - **Never reference a certificate that does not exist yet.** With
   nginx-proxy, a `CERT_NAME` pointing at a missing file makes it emit a broken
   server block, `nginx -t` fails, and the reload takes down every other vhost.

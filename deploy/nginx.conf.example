@@ -11,6 +11,12 @@
 #      ACME block, so the challenge must be answered here; otherwise
 #      Let's Encrypt gets a 404 and certificate issuance fails.
 #
+#   3. client_max_body_size — nginx defaults to 1 MB, and a chat request that
+#      carries tool output blows past that easily. nginx then answers
+#      HTTP 413 Request Entity Too Large before the router ever sees the
+#      request, and the client reports it as the provider rejecting the
+#      prompt for being too long. Raise it well above your largest context.
+#
 # Authorization is passed through untouched — the router verifies its own
 # bearer token and the proxy must neither add nor strip credentials.
 
@@ -22,6 +28,10 @@ server {
     proxy_read_timeout 600s;
     proxy_send_timeout 600s;
     proxy_connect_timeout 15s;
+
+    # nginx defaults to 1 MB; a tool-heavy conversation exceeds that and is
+    # rejected here with 413 before the router runs.
+    client_max_body_size 128m;
 
     location /.well-known/acme-challenge/ {
         root /usr/share/nginx/html;
