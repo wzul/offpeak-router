@@ -175,10 +175,62 @@ func TestGemma4RoutingAndCapabilities(t *testing.T) {
 	}
 }
 
+// kimi-k3.1-pro is registered against the main ollama account only. The negative half is
+// the point: opencode's go plan does not carry it, so a request for it must never be
+// handed to go, and the ledger must bill it at its own card rather than the ollama block
+// that is 13x cheaper on input.
+func TestKimiK31ProIsOllamaOnly(t *testing.T) {
+	prevProvs, prevRates := provs, rates
+	t.Cleanup(func() { provs, rates = prevProvs, prevRates })
+	provs = defaultProviders()
+
+	if got, ok := resolveModel("kimi-k3.1-pro"); !ok || got != "kimi-k3.1-pro" {
+		t.Fatalf("resolveModel(kimi-k3.1-pro) = %q, %v; want the canonical name", got, ok)
+	}
+	var by []string
+	for name := range provs {
+		if servesModel(name, "kimi-k3.1-pro") {
+			by = append(by, name)
+		}
+	}
+	sort.Strings(by)
+	if len(by) != 1 || by[0] != "ollama" {
+		t.Fatalf("kimi providers = %v, want exactly [ollama]", by)
+	}
+	if servesModel("go", "kimi-k3.1-pro") {
+		t.Error("go must not serve kimi-k3.1-pro")
+	}
+	if api := modelAPI("kimi-k3.1-pro"); api != APIChat {
+		t.Errorf("api = %q, want chat", api)
+	}
+	for _, want := range []string{"completion", "vision", "thinking", "tools"} {
+		if !contains(capabilitiesFor("kimi-k3.1-pro"), want) {
+			t.Errorf("capabilities missing %q: %v", want, capabilitiesFor("kimi-k3.1-pro"))
+		}
+	}
+	if p := capabilityProvidersFor("kimi-k3.1-pro")["vision"]; len(p) != 1 || p[0] != "ollama" {
+		t.Errorf("vision providers = %v, want [ollama]", p)
+	}
+
+	// Billing: the model card wins over the provider block, and the price is the
+	// published one — 1M in + 1M out is $12.00, not the $0.75 the ollama block implies.
+	got, ok := ratesFor("ollama", "kimi-k3.1-pro")
+	if !ok || got != kimiRates {
+		t.Fatalf("ratesFor(ollama, kimi-k3.1-pro) = %+v, want %+v", got, kimiRates)
+	}
+	if got.PeakMult != 1.0 {
+		t.Errorf("peak_mult = %v, want 1.0 (Ollama publishes a single price for it)", got.PeakMult)
+	}
+	if c := requestCost("ollama", "kimi-k3.1-pro", 1e6, 0, 1e6, false); c < 11.99 || c > 12.01 {
+		t.Errorf("cost = %v, want 12.00", c)
+	}
+}
+
 // Tool calling is advertised because it was measured: every upstream below was asked
 // directly with a tool definition and answered with tool_calls. A client that reads this
 // flag and sends tools must not discover the gap at request time.
 func TestToolsCapabilityIsPublished(t *testing.T) {
+
 	for _, model := range []string{"deepseek-v4.1-flash", "gemma4"} {
 		found := false
 		for _, c := range capabilitiesFor(model) {

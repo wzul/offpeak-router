@@ -21,7 +21,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.18.0"
+const Version = "1.19.0"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -115,9 +115,17 @@ var canonicalModel = "deepseek-v4.1-flash"
 // zero, which would make the ledger under-report real spend.
 var clefRates = Rates{In: 0.24, Cache: 0.24, Out: 0.24, PeakMult: 1.0}
 
+// kimiRates is Ollama's published kimi-k3.1-pro pricing: $2.00 input, $0.20 cached
+// input, $10.00 output per 1M tokens. The price table lists a single rate for it
+// (no separate off-peak row, unlike deepseek), so PeakMult stays 1.0. Without a
+// model-level card this model would be billed at the ollama provider block —
+// 13× under the real input rate — so the card is not optional.
+var kimiRates = Rates{In: 2.00, Cache: 0.20, Out: 10.00, PeakMult: 1.0}
+
 // defaultProviders is the built-in table, used when no config file is given.
 // Every provider here serves deepseek-v4.1-flash under its own id; Ollama
-// additionally serves clef, which no other provider has.
+// additionally serves clef, which no other provider has, and kimi-k3.1-pro,
+// which is deliberately Ollama-only (see the note on that entry).
 func defaultProviders() map[string]*Provider {
 	return map[string]*Provider{
 		"go": {
@@ -136,6 +144,11 @@ func defaultProviders() map[string]*Provider {
 				// so only ollama carries it. Same canonical name, provider-specific id.
 				"gemma4": {ID: "gemma4:31b"},
 				"clef":   {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
+				// kimi-k3.1-pro is registered on ollama only, on purpose: opencode's
+				// go plan does not carry it, and at $2/$10 per 1M tokens it must not
+				// ride an account nobody asked it to spend. Its own rate card travels
+				// with the entry so the ledger bills it at its real price.
+				"kimi-k3.1-pro": {ID: "kimi-k3.1-pro", Rates: &kimiRates},
 			},
 			KeyEnv: "OLLAMA_API_KEY",
 			Web:    true,

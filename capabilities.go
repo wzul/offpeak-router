@@ -20,6 +20,9 @@ var modelCapabilities = map[string][]string{
 	// Clef answers one decision schema behind /v1/systemone; tool calling is not part
 	// of that shape, so it is not claimed here.
 	"clef": {"completion"},
+	// kimi-k3.1-pro answered "Red" for a red PNG, called a tool with
+	// {"city":"Kuala Lumpur"}, and emitted reasoning on ollama; nothing else serves it.
+	"kimi-k3.1-pro": {"completion", "vision", "thinking", "tools"},
 }
 
 // capabilityProviders records which upstream each capability was verified on.
@@ -38,6 +41,13 @@ var capabilityProviders = map[string]map[string][]string{
 	"gemma4": {
 		"vision": {"ollama"},
 		"tools":  {"ollama", "ollama-lenjan"},
+	},
+	// Measured on the main ollama account only, so that is all it names: the spare
+	// account must not be advertised for a model it was never asked to serve.
+	"kimi-k3.1-pro": {
+		"vision":   {"ollama"},
+		"thinking": {"ollama"},
+		"tools":    {"ollama"},
 	},
 }
 
