@@ -447,6 +447,24 @@ A provider that serves no chat model cannot be probed and stays held rather than
 released on a guess; `clef`-only accounts would need the `/v1/systemone` shape added to the
 probe before they could recover on their own.
 
+### What the journal may hold
+
+The journal is a diagnostic sink, not an archive of conversations, and journald keeps it for
+months. Every failure line carries metadata only — provider name, route family, status class —
+and the upstream's own error text is cut to 120 characters (`shortErr`, applied at every log
+call site in `redact.go`). The reason is narrow but real: a provider's error body can quote the
+parameters it rejected, so an uncut 400 body ends up in `journalctl` for as long as the journal
+is retained. Measured on this host, the longest such line was 311 characters before the cut.
+
+```
+journalctl → provider ollama failed (ollama/chat): HTTP 400: {"error":{"message":"invalid image in
+             message: ollama: 400: invalid image: expected image mime type, got "application/octet-…
+```
+
+No prompt, no completion and no header map is logged on any path, and no request body is echoed
+in a shadow/dry-run response. The trade-off is explicit: a long upstream error arrives shortened,
+so the status and the first clause of the message are what a debugging session gets.
+
 ### The spare account
 
 `ollama-lenjan` is a second ollama.com account with `First: true`. It is tried before every

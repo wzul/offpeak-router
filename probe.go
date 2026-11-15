@@ -211,7 +211,7 @@ func probeProviderHTTP(ctx context.Context, name string, p *Provider) bool {
 
 	resp, err := httpc.Do(req)
 	if err != nil {
-		log.Printf("provider %s probe: %v", name, err)
+		log.Printf("provider %s probe: %s", name, shortErr(err))
 		return false
 	}
 	defer resp.Body.Close()

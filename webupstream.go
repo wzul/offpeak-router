@@ -139,7 +139,7 @@ func routedSearch(ctx context.Context, q string, limit int) ([]webHit, string, e
 			if accountBlame(err) {
 				breakerFailWith(name, err)
 			}
-			log.Printf("web search via %s failed: %v", name, err)
+			log.Printf("web search via %s failed: %s", name, shortErr(err))
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -214,7 +214,7 @@ func routedFetchNamed(ctx context.Context, target string) (fetchDoc, string) {
 			if accountBlame(err) {
 				breakerFailWith(name, err)
 			}
-			log.Printf("web fetch via %s failed: %v", name, err)
+			log.Printf("web fetch via %s failed: %s", name, shortErr(err))
 			if firstErr == nil {
 				firstErr = err
 			}

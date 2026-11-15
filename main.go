@@ -21,7 +21,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.19.1"
+const Version = "1.19.2"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -694,7 +694,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 			breakerOK(name)
 			return
 		} else {
-			log.Printf("provider %s failed: %v", name, err)
+			log.Printf("provider %s failed: %s", name, shortErr(err))
 			breakerFailWith(name, err)
 			anyFailover = true
 			attempts = append(attempts, map[string]string{
@@ -794,7 +794,7 @@ func handleSystemOne(w http.ResponseWriter, r *http.Request) {
 			breakerOK(name)
 			return
 		} else {
-			log.Printf("provider %s failed: %v", name, err)
+			log.Printf("provider %s failed: %s", name, shortErr(err))
 			breakerFailWith(name, err)
 			anyFailover = true
 			attempts = append(attempts, map[string]string{

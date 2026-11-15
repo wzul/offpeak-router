@@ -411,7 +411,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 			breakerOK(name)
 			return
 		}
-		log.Printf("provider %s failed (anthropic/messages): %v", name, serveErr)
+		log.Printf("provider %s failed (anthropic/messages): %s", name, shortErr(serveErr))
 		// Classified, not merely counted: an unpaid bill on this dialect must park the account
 		// the same way it does on the OpenAI path, or Claude Code keeps retrying a dead account
 		// once a minute while every other client has already moved on.
