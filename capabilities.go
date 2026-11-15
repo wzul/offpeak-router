@@ -42,12 +42,12 @@ var capabilityProviders = map[string]map[string][]string{
 		"vision": {"ollama"},
 		"tools":  {"ollama", "ollama-lenjan"},
 	},
-	// Measured on the main ollama account only, so that is all it names: the spare
-	// account must not be advertised for a model it was never asked to serve.
+	// Measured on both ollama accounts, so both are named: lenjan is tried first, and a
+	// capability published for one account only would under-report what the pinned path can do.
 	"kimi-k3.1-pro": {
-		"vision":   {"ollama"},
-		"thinking": {"ollama"},
-		"tools":    {"ollama"},
+		"vision":   {"ollama", "ollama-lenjan"},
+		"thinking": {"ollama", "ollama-lenjan"},
+		"tools":    {"ollama", "ollama-lenjan"},
 	},
 }
 

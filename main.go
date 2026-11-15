@@ -21,7 +21,7 @@ import (
 )
 
 // Version is reported in the User-Agent and should match the release tag.
-const Version = "1.19.0"
+const Version = "1.19.1"
 
 // DefaultUserAgent lives in headers.go: it carries the client identity the
 // upstream expects, because naming this router in the User-Agent is a signpost
@@ -144,10 +144,9 @@ func defaultProviders() map[string]*Provider {
 				// so only ollama carries it. Same canonical name, provider-specific id.
 				"gemma4": {ID: "gemma4:31b"},
 				"clef":   {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
-				// kimi-k3.1-pro is registered on ollama only, on purpose: opencode's
-				// go plan does not carry it, and at $2/$10 per 1M tokens it must not
-				// ride an account nobody asked it to spend. Its own rate card travels
-				// with the entry so the ledger bills it at its real price.
+				// kimi-k3.1-pro is the dear model in the table ($2/$10 per 1M), registered
+				// on the ollama accounts only: opencode's go plan does not carry it. Its own
+				// rate card travels with the entry so the ledger bills it at its real price.
 				"kimi-k3.1-pro": {ID: "kimi-k3.1-pro", Rates: &kimiRates},
 			},
 			KeyEnv: "OLLAMA_API_KEY",
@@ -166,6 +165,10 @@ func defaultProviders() map[string]*Provider {
 				// clef rides the same subscription: the /v1/systemone decision route, with
 				// its own rate card, so a pinned request there is still billed correctly.
 				"clef": {ID: "clef:27b", Rates: &clefRates, API: APISystemOne},
+				// The spare carries kimi too, and First puts it in front: every request the
+				// account can serve is tried here before the pin falls to the peak and price
+				// order below. Skipping it for one model would silently break that rule.
+				"kimi-k3.1-pro": {ID: "kimi-k3.1-pro", Rates: &kimiRates},
 			},
 			KeyEnv: "OLLAMA_LENJAN_API_KEY",
 			First:  true,

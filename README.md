@@ -204,11 +204,13 @@ curl -s -H "Authorization: Bearer $ROUTER_AUTH_TOKEN" http://127.0.0.1:8788/v1/m
   names `ollama` alone. Both the canonical name and the upstream id resolve.
 - **`kimi-k3.1-pro` is ollama-only on purpose.** It is the expensive model in the table
   ($2.00 in / $0.20 cached / $10.00 out per 1M tokens, one published price, no off-peak row),
-  so it is registered against the main ollama account only — not `go`, and not the spare
-  `ollama-lenjan` account. It carries its own `Rates` card because the provider block would
-  bill it 13× under its real input price. Capabilities were measured on that account:
-  `vision` (answered "Red" for a red PNG), `thinking`, and `tools` (called a tool with
-  `{"city":"Kuala Lumpur"}`). It is not the default model; a request must name it.
+  so it is registered on the two ollama accounts and nowhere else — `go` does not carry it.
+  The pinned spare account is *not* bypassed: `ollama-lenjan` serves it first at any hour,
+  and `ollama` is the fallback, the same rule every other model follows. It carries its own
+  `Rates` card because the provider block would bill it 13× under its real input price.
+  Capabilities were measured on both accounts: `vision` (answered "Red" for a red PNG),
+  `thinking`, and `tools` (called a tool with `{"city":"Kuala Lumpur"}`). It is not the
+  default model; a request must name it.
 
 ### Model discovery, in both dialects
 

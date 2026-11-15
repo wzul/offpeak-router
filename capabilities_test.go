@@ -175,10 +175,10 @@ func TestGemma4RoutingAndCapabilities(t *testing.T) {
 	}
 }
 
-// kimi-k3.1-pro is registered against the main ollama account only. The negative half is
-// the point: opencode's go plan does not carry it, so a request for it must never be
-// handed to go, and the ledger must bill it at its own card rather than the ollama block
-// that is 13x cheaper on input.
+// kimi-k3.1-pro lives on the two ollama accounts and nowhere else. The negative half is the
+// point: opencode's go plan does not carry it, so a request for it must never be handed to go.
+// The positive half is the owner's standing rule - the pinned spare runs first for everything it
+// can serve, so kimi must be first on lenjan at every hour, not only off-peak.
 func TestKimiK31ProIsOllamaOnly(t *testing.T) {
 	prevProvs, prevRates := provs, rates
 	t.Cleanup(func() { provs, rates = prevProvs, prevRates })
@@ -194,11 +194,20 @@ func TestKimiK31ProIsOllamaOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(by)
-	if len(by) != 1 || by[0] != "ollama" {
-		t.Fatalf("kimi providers = %v, want exactly [ollama]", by)
+	if len(by) != 2 || by[0] != "ollama" || by[1] != "ollama-lenjan" {
+		t.Fatalf("kimi providers = %v, want [ollama ollama-lenjan]", by)
 	}
 	if servesModel("go", "kimi-k3.1-pro") {
 		t.Error("go must not serve kimi-k3.1-pro")
+	}
+	for _, hour := range []int{0, 2, 8, 11, 13, 17, 23} {
+		order := candidateOrder(mon(hour), zero(), "kimi-k3.1-pro")
+		if len(order) == 0 || order[0] != "ollama-lenjan" {
+			t.Errorf("%02d:00 kimi order = %v, want ollama-lenjan first", hour, order)
+		}
+		if len(order) != 2 || order[1] != "ollama" {
+			t.Errorf("%02d:00 kimi order = %v, want the spare then ollama", hour, order)
+		}
 	}
 	if api := modelAPI("kimi-k3.1-pro"); api != APIChat {
 		t.Errorf("api = %q, want chat", api)
@@ -208,8 +217,10 @@ func TestKimiK31ProIsOllamaOnly(t *testing.T) {
 			t.Errorf("capabilities missing %q: %v", want, capabilitiesFor("kimi-k3.1-pro"))
 		}
 	}
-	if p := capabilityProvidersFor("kimi-k3.1-pro")["vision"]; len(p) != 1 || p[0] != "ollama" {
-		t.Errorf("vision providers = %v, want [ollama]", p)
+	for _, cap := range []string{"vision", "thinking", "tools"} {
+		if p := capabilityProvidersFor("kimi-k3.1-pro")[cap]; len(p) != 2 {
+			t.Errorf("%s providers = %v, want both ollama accounts", cap, p)
+		}
 	}
 
 	// Billing: the model card wins over the provider block, and the price is the
